@@ -12,6 +12,13 @@ Transcripts are the user's private data. Use diagrun's output; do not open or
 parse `~/.claude/projects` yourself. If a permission check blocks a command,
 tell the user and give them the command to run. Do not get the data another way.
 
+## Feedback
+
+For a bug or idea about diagrun, use the curl command in `bin/diagrun guide`
+(`commands.feedback`). It sends text to an external relay: show the user the
+exact message and send only after a yes. Include no prompts, file names, paths,
+commands, usage figures or names. If `FEEDBACK_RELAY` is `off`, send nothing.
+
 ## 1. Build and scan
 
 Needs [machin](https://github.com/javimosch/machin) and a C compiler.

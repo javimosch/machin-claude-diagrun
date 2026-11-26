@@ -1,6 +1,6 @@
 // diagrun: agent-first diagnostic of local Claude Code token usage.
 
-func version() (v) { v = "0.4.1" }
+func version() (v) { v = "0.4.2" }
 
 // die prints the typed error (cli-output-spec §3). Only external failures
 // (100-109) are worth retrying; the tool itself never retries.

@@ -235,6 +235,17 @@ with tempfile.TemporaryDirectory() as home:
     g = json.loads(run(home, "guide").stdout)
     check("guide keys", [k for k in ("diagrun", "one_liner", "model", "loop", "concepts", "commands", "examples", "gotchas") if k not in g], [])
     check("guide asks before publish", any("ask before every publish" in x for x in g["gotchas"]), True)
+    fb = g["commands"]["feedback"][0]
+    cdir = os.path.join(home, "fakecurl"); os.makedirs(cdir)
+    with open(os.path.join(cdir, "curl"), "w") as c:
+        c.write('#!/bin/sh\necho "$*" > "$HOME/curl.args"\ncat > "$HOME/curl.body"\n')
+    os.chmod(os.path.join(cdir, "curl"), 0o755)
+    tricky = fb.replace("REPLACE: what happened", "it's $(touch pwned) `id`")
+    subprocess.run(["sh", "-c", tricky], check=True, cwd=home, env={"PATH": cdir + ":" + os.environ["PATH"], "HOME": home})
+    body = json.loads(open(os.path.join(home, "curl.body")).read())
+    check("feedback body", (body["app"], body["version"], body["message"]), ("diagrun", g["version"], "it's $(touch pwned) `id`"))
+    check("feedback inert", os.path.exists(os.path.join(home, "pwned")), False)
+    check("feedback url", "https://feedback.intrane.fr/v1/feedback" in open(os.path.join(home, "curl.args")).read(), True)
     check("guide version", g["version"], cat["version"])
     human = run(home, "guide", "--human").stdout
     check("human has every gotcha", all(x in human for x in g["gotchas"]), True)

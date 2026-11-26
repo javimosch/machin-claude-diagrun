@@ -60,13 +60,13 @@ bin/diagrun report --days 7         # ~/.diagrun/report.html</code></pre>
 <p>Causes, task classes and triggers are <strong>inferred</strong> from token counts, timestamps and known transcript markers. Savings figures overlap, so do not add them. Prices are built into the binary and can go out of date.</p>
 
 <h2>Made for agents</h2>
-<p><code>guide</code> and <code>help-json</code> describe the tool from the binary alone. Data goes to stdout; errors are typed, carry suggestions and use distinct exit codes. It follows the <code>output</code> and <code>guide</code> conventions of <a href="https://cli-specs.intrane.fr/">cli-specs</a>. <code>feedback</code>, <code>update</code> and <code>install</code> are not implemented, and there is no telemetry.</p>
+<p><code>guide</code> and <code>help-json</code> describe the tool from the binary alone. Data goes to stdout; errors are typed, carry suggestions and use distinct exit codes. It follows the <code>output</code> and <code>guide</code> conventions of <a href="https://cli-specs.intrane.fr/">cli-specs</a>. There is no <code>feedback</code> command, but <code>guide</code> gives a curl command for sending feedback. <code>update</code> and <code>install</code> are not implemented, and there is no telemetry.</p>
 
 <h2>Privacy</h2>
 <ul>
 <li>By default, output holds no prompt text, file names or commands.</li>
 <li><code>--examples</code> adds them. Commands may contain secrets.</li>
-<li>The network is used only by <code>report --publish</code>, which uploads to <a href="https://hart.intrane.fr">hart</a>.</li>
+<li>The binary uses the network only for <code>report --publish</code>, which uploads to <a href="https://hart.intrane.fr">hart</a>. The feedback curl command in <code>guide</code> is run separately.</li>
 <li>Publishing with examples requires <code>--private</code> and a read key. An unlisted page is readable by anyone with its link.</li>
 </ul>
 

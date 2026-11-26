@@ -26,6 +26,13 @@ HART_READ_KEY=... bin/diagrun report --examples --publish --owner you --private
 Agents working in this repo: see [AGENTS.md](AGENTS.md) and the
 [diagrun skill](.claude/skills/diagrun/SKILL.md). They ask before publishing.
 
+## Feedback
+
+`bin/diagrun guide` includes a curl command that sends feedback to
+`https://feedback.intrane.fr`. This is not full
+[cli-feedback-spec](https://github.com/javimosch/cli-feedback-spec) adoption:
+there is no `diagrun feedback` command.
+
 ## Differences from the original
 
 - Prices per model generation, including Fable, with 5 min and 1 h cache writes.
