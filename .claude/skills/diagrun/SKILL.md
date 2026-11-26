@@ -14,10 +14,12 @@ tell the user and give them the command to run. Do not get the data another way.
 
 ## Feedback
 
-For a bug or idea about diagrun, use the curl command in `bin/diagrun guide`
-(`commands.feedback`). It sends text to an external relay: show the user the
-exact message and send only after a yes. Include no prompts, file names, paths,
-commands, usage figures or names. If `FEEDBACK_RELAY` is `off`, send nothing.
+For a bug or idea about diagrun:
+`bin/diagrun feedback "<message>" -kind bug -context "<what you were doing>"`.
+It sends text to an external relay: show the user the exact message and context
+and send only after a yes. Include no prompts, file names, paths, commands,
+usage figures or names, and do not pass `-reporter` unless asked. It exits 0
+even on failure: check `data.relayed`.
 
 ## 1. Build and scan
 

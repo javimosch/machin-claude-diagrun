@@ -3,5 +3,5 @@
 set -eu
 cd "$(dirname "$0")"
 mkdir -p bin
-machin encode vendor/json.src src/pricing.src src/load.src src/trigger.src src/cache.src src/analyze.src src/render.src src/guide.src src/main.src > bin/diagrun.mfl
+machin encode vendor/json.src src/pricing.src src/load.src src/trigger.src src/cache.src src/analyze.src src/render.src src/guide.src src/feedback.src src/main.src > bin/diagrun.mfl
 machin build bin/diagrun.mfl -o bin/diagrun

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end tests on synthetic transcripts. HOME and --root both point at a
 temp directory, so real transcripts are never read."""
-import json, os, resource, subprocess, sys, tempfile, datetime
+import http.server, threading, json, os, resource, subprocess, sys, tempfile, datetime
 
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "diagrun")
 NOW = datetime.datetime.now(datetime.timezone.utc)
@@ -225,27 +225,65 @@ with tempfile.TemporaryDirectory() as home:
     for key in ("rows", "by_pause", "by_trigger"):
         check(f"idle {key} add up", sum(x["usd"] for x in idle[key]), total)
 
+    # feedback, against a local relay: the real relay is never contacted
+    got, reply = [], [200, b'{"ok":true,"id":"x","stored":true}']
+    class Relay(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append((self.path, json.loads(self.rfile.read(int(self.headers["content-length"])))))
+            self.send_response(reply[0]); self.end_headers(); self.wfile.write(reply[1])
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Relay)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    renv = {"FEEDBACK_RELAY": f"http://127.0.0.1:{srv.server_port}/", "USER": "someaccount"}
+    def feedback(*a, env=renv):
+        p = run(home, "feedback", *a, env=env)
+        return p.returncode, (json.loads(p.stdout)["data"] if p.stdout else None)
+    msg = "it's \"quoted\" \\ $(touch pwned) `id`\nline two\ttab \x01 é 😀"
+    code, d = feedback(msg, "-kind", "bug", "-context", "testing")
+    check("feedback delivered", (code, d["stored"], d["relayed"]), (0, 0, 1))
+    path, body = got[-1]
+    check("feedback path", path, "/v1/feedback")
+    check("feedback body", body, {"id": d["id"], "app": "diagrun", "version": run(home, "version").stdout.strip(), "kind": "bug", "message": msg, "context": "testing", "reporter": "agent"})
+    check("feedback id", (len(d["id"]), int(d["id"], 16) >= 0), (32, True))
+    check("feedback inert", os.path.exists("pwned") or os.path.exists(os.path.join(home, "pwned")), False)
+    code, d2 = feedback("again", "--reporter", "me")
+    check("feedback defaults", (got[-1][1]["kind"], got[-1][1]["reporter"], d2["id"] != d["id"]), ("note", "me", True))
+    feedback("odd kind", "-kind", "question")
+    check("unknown kind kept", got[-1][1]["kind"], "question")
+    for status, text in ((429, b'{"ok":false,"error":"slow down"}'), (500, b"oops"), (200, b'{"ok":false}'), (200, b"<html>")):
+        reply[:] = [status, text]
+        before = len(got)
+        code, d = feedback("x")
+        check(f"feedback never fails ({status} {text[:12]})", (code, d["relayed"], bool(d["reason"]), len(got) - before), (0, 0, True, 1))
+    before = len(got)
+    code, d = feedback("x", env={"FEEDBACK_RELAY": "off"})
+    check("relay off", (code, d["relayed"], len(got)), (0, 0, before))
+    srv.shutdown(); srv.server_close()
+    code, d = feedback("x")
+    check("relay unreachable", (code, d["relayed"]), (0, 0))
+    check("empty message", feedback("   ")[0], 80)
+    check("missing message", feedback()[0], 80)
+    check("oversized", feedback("y" * 9000)[0], 85)
+    check("kind outside feedback", run(home, "scan", "-kind", "bug").returncode, 80)
+    # default relay URL, with curl faked so nothing leaves the machine
+    cdir = os.path.join(home, "fakecurl"); os.makedirs(cdir)
+    with open(os.path.join(cdir, "curl"), "w") as c:
+        c.write('#!/bin/sh\necho "$*" > "$HOME/curl.args"\nprintf \'{"ok":true}\\n200\'\n')
+    os.chmod(os.path.join(cdir, "curl"), 0o755)
+    code, d = feedback("x", env={"PATH": cdir + ":" + os.environ["PATH"]})
+    check("default relay", (d["relayed"], "https://feedback.intrane.fr/v1/feedback" in open(os.path.join(home, "curl.args")).read()), (1, True))
+
     check("no data exit", run(home, "scan", "--root", os.path.join(home, "none")).returncode, 92)
     check("bad days", run(home, "scan", "--days", "x").returncode, 85)
     p = run(home, "bogus")
     check("typed error", json.loads(p.stderr)["error"]["type"], "invalid_argument")
     # cli-output-spec / cli-guide-spec behaviour the validator does not cover
     cat = json.loads(run(home, "help-json").stdout)
-    check("catalog", (sorted(cat["commands"]), cat["env"]), (["guide", "help-json", "report", "scan", "version"], ["HOME", "HART_URL", "HART_READ_KEY"]))
+    check("catalog", (sorted(cat["commands"]), cat["env"]), (["feedback", "guide", "help-json", "report", "scan", "version"], ["HOME", "HART_URL", "HART_READ_KEY", "FEEDBACK_RELAY"]))
     g = json.loads(run(home, "guide").stdout)
     check("guide keys", [k for k in ("diagrun", "one_liner", "model", "loop", "concepts", "commands", "examples", "gotchas") if k not in g], [])
     check("guide asks before publish", any("ask before every publish" in x for x in g["gotchas"]), True)
-    fb = g["commands"]["feedback"][0]
-    cdir = os.path.join(home, "fakecurl"); os.makedirs(cdir)
-    with open(os.path.join(cdir, "curl"), "w") as c:
-        c.write('#!/bin/sh\necho "$*" > "$HOME/curl.args"\ncat > "$HOME/curl.body"\n')
-    os.chmod(os.path.join(cdir, "curl"), 0o755)
-    tricky = fb.replace("REPLACE: what happened", "it's $(touch pwned) `id`")
-    subprocess.run(["sh", "-c", tricky], check=True, cwd=home, env={"PATH": cdir + ":" + os.environ["PATH"], "HOME": home})
-    body = json.loads(open(os.path.join(home, "curl.body")).read())
-    check("feedback body", (body["app"], body["version"], body["message"]), ("diagrun", g["version"], "it's $(touch pwned) `id`"))
-    check("feedback inert", os.path.exists(os.path.join(home, "pwned")), False)
-    check("feedback url", "https://feedback.intrane.fr/v1/feedback" in open(os.path.join(home, "curl.args")).read(), True)
     check("guide version", g["version"], cat["version"])
     human = run(home, "guide", "--human").stdout
     check("human has every gotcha", all(x in human for x in g["gotchas"]), True)

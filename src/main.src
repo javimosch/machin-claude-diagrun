@@ -1,6 +1,6 @@
 // diagrun: agent-first diagnostic of local Claude Code token usage.
 
-func version() (v) { v = "0.4.2" }
+func version() (v) { v = "0.5.0" }
 
 // die prints the typed error (cli-output-spec §3). Only external failures
 // (100-109) are worth retrying; the tool itself never retries.
@@ -15,10 +15,10 @@ func usage(message) { die(80, "invalid_argument", message, []string{"diagrun hel
 
 func bad_value(message, fix) { die(85, "invalid_value", message, []string{fix}) }
 
-type Opts struct { cmd string  days int  root string  out string  owner string  artifact string  examples bool  publish bool  private bool  human bool  json_flag bool }
+type Opts struct { cmd string  days int  root string  out string  owner string  artifact string  examples bool  publish bool  private bool  human bool  json_flag bool  message string  kind string  context string  reporter string }
 
 func parse_args(a) (o) {
-    o = Opts{cmd: "", days: 7, root: env("HOME") + "/.claude/projects", out: "", owner: "", artifact: "diagrun", examples: false, publish: false, private: false, human: false, json_flag: false}
+    o = Opts{cmd: "", days: 7, root: env("HOME") + "/.claude/projects", out: "", owner: "", artifact: "diagrun", examples: false, publish: false, private: false, human: false, json_flag: false, message: "", kind: "note", context: "", reporter: "agent"}
     i := 1
     for i < len(a) {
         x := a[i]
@@ -40,7 +40,16 @@ func parse_args(a) (o) {
             if x == "--artifact" { o.artifact = v }
             i = i + 1
         }
+        else if x == "-kind" || x == "--kind" || x == "-context" || x == "--context" || x == "-reporter" || x == "--reporter" {
+            if o.cmd != "feedback" { usage(x + " only applies to feedback, after the command") }
+            if i + 1 >= len(a) { usage(x + " needs a value") }
+            if has_suffix(x, "kind") { o.kind = a[i + 1] }
+            if has_suffix(x, "context") { o.context = a[i + 1] }
+            if has_suffix(x, "reporter") { o.reporter = a[i + 1] }
+            i = i + 1
+        }
         else if o.cmd == "" && !has_prefix(x, "-") { o.cmd = x }
+        else if o.cmd == "feedback" && o.message == "" && !has_prefix(x, "-") { o.message = x }
         else { usage("unknown argument: " + x) }
         i = i + 1
     }
@@ -97,6 +106,11 @@ func main() {
     }
     if o.cmd == "version" {
         if o.json_flag { println("{\"ok\":true,\"version\":" + json(version()) + "}") } else { println(version()) }
+        return
+    }
+    if o.cmd == "feedback" {
+        if o.publish { usage("--publish only applies to report") }
+        run_feedback(o)
         return
     }
     if o.cmd != "scan" && o.cmd != "report" { usage("unknown command: " + o.cmd) }

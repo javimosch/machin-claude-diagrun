@@ -12,7 +12,7 @@ func guide_model() (p) {
     p = []Pair{
         Pair{k: "input", v: "*.jsonl transcripts under --root (default ~/.claude/projects), limited to the last --days"},
         Pair{k: "billing", v: "each API message once, even if copied into a resumed transcript; subagents separately; unknown models are listed as unpriced, never guessed"},
-        Pair{k: "network", v: "the binary makes no network call except report --publish, which calls the hart CLI; feedback is a separate curl you run yourself"}
+        Pair{k: "network", v: "only on request: report --publish (through the hart CLI) and feedback (through curl, to FEEDBACK_RELAY, default https://feedback.intrane.fr)"}
     }
 }
 
@@ -50,20 +50,11 @@ func local_commands() (c) {
 
 func publish_commands() (c) { c = []string{"diagrun report --publish --owner NAME [--artifact NAME] [--private]"} }
 
-// feedback is plain curl to the cli-feedback-spec relay: the binary sends
-// nothing itself. The quoted heredoc keeps any message text inert in the shell.
-// This is not a `feedback` command, so the spec is not claimed.
-func feedback_curl() (c) {
-    c = "curl -sS -m 15 \"${FEEDBACK_RELAY:-https://feedback.intrane.fr}/v1/feedback\" -H 'content-type: application/json' --data-binary @- <<'EOF'\n" +
-        "{\"app\":\"diagrun\",\"version\":" + json(version()) + ",\"kind\":\"bug\",\"message\":\"REPLACE: what happened\",\"context\":\"REPLACE: what you were doing\",\"reporter\":\"agent\"}\n" +
-        "EOF"
-}
-
-func feedback_commands() (c) { c = []string{feedback_curl()} }
+func feedback_commands() (c) { c = []string{"diagrun feedback \"<message>\" [-kind bug|idea|praise|note] [-context \"<what you were doing>\"] [-reporter NAME]"} }
 
 func guide_examples() (r) {
     r = []Recipe{
-        Recipe{goal: "send feedback about diagrun, after the user agrees to the exact text", do: []string{feedback_curl()}},
+        Recipe{goal: "send feedback about diagrun, after the user agrees to the exact text", do: []string{"diagrun feedback \"idle rebuild labels look wrong\" -kind bug"}},
         Recipe{goal: "see why cache writes were paid this week", do: []string{"diagrun scan --days 7 > scan.json", "jq .cache_writes scan.json"}},
         Recipe{goal: "write a local HTML report", do: []string{"diagrun report --days 30 --out report.html"}},
         Recipe{goal: "publish a report with prompts and commands, password-gated", do: []string{"HART_READ_KEY=... diagrun report --examples --publish --owner NAME --private"}}
@@ -75,7 +66,8 @@ func guide_gotchas() (g) {
         "default output holds no prompt text, file names or commands; --examples adds them, and commands may contain secrets",
         "agents: ask before every publish (a request for a report is not permission to upload), never guess --owner, and keep --examples off unless asked",
         "feedback leaves the machine: show the user the exact text and send only after a yes; no prompts, file names, paths, commands, usage figures or names in it",
-        "feedback kinds are bug, idea, praise or note; the reply {ok, id, stored} means it was recorded, so do not resend; if FEEDBACK_RELAY is off, send nothing",
+        "feedback exits 0 even when delivery fails: check data.relayed (1 delivered, 0 not, see data.reason); each run gets a new id, so rerunning after a lost reply may record it twice; FEEDBACK_RELAY=off sends nothing",
+        "feedback reporter is \"agent\" unless -reporter is given; the OS user name is never sent",
         "publishing with --examples requires --private and HART_READ_KEY",
         "an unlisted hart page is readable by anyone who has the link",
         "model_fit, context and idle rebuild figures overlap: never add them",
@@ -130,26 +122,27 @@ func guide_human() (g) {
     g = "# diagrun " + version() + "\n\n" + about() + ".\n\n" + one_liner() + "\n"
     g = g + md_pairs("Model", guide_model()) + md_list("Loop", guide_loop()) + md_pairs("Concepts", guide_concepts())
     g = g + md_list("Commands", local_commands()) + md_list("Publishing", publish_commands()) + "\n## Examples\n"
-    for _, r := range guide_examples() { g = g + "\n" + r.goal + ":\n\n    " + replace(join(r.do, "\n"), "\n", "\n    ") + "\n" }
+    for _, r := range guide_examples() { g = g + "\n" + r.goal + ":\n\n    " + join(r.do, "\n    ") + "\n" }
     g = g + md_list("Gotchas", guide_gotchas())
 }
 
 // command_json is one catalog entry. No command authenticates by itself;
 // --publish relies on the hart CLI's own configuration.
-func command_json(name, summary, flags) (out) {
-    out = json(name) + ":{\"summary\":" + json(summary) + ",\"args\":[],\"flags\":" + j_strings(flags) + ",\"auth\":false}"
+func command_json(name, summary, args, flags) (out) {
+    out = json(name) + ":{\"summary\":" + json(summary) + ",\"args\":" + j_strings(args) + ",\"flags\":" + j_strings(flags) + ",\"auth\":false}"
 }
 
 func help_json() (h) {
     c := []string{
-        command_json("scan", "diagnostic as JSON", []string{"--days N", "--root DIR", "--examples"}),
-        command_json("report", "write an HTML report; --publish uploads it to hart", []string{"--days N", "--root DIR", "--examples", "--out FILE", "--publish", "--owner NAME", "--artifact NAME", "--private"}),
-        command_json("guide", "the mental model, loop and gotchas", []string{"--human"}),
-        command_json("help-json", "this catalog", []string{}),
-        command_json("version", "the version", []string{})
+        command_json("scan", "diagnostic as JSON", []string{}, []string{"--days N", "--root DIR", "--examples"}),
+        command_json("report", "write an HTML report; --publish uploads it to hart", []string{}, []string{"--days N", "--root DIR", "--examples", "--out FILE", "--publish", "--owner NAME", "--artifact NAME", "--private"}),
+        command_json("guide", "the mental model, loop and gotchas", []string{}, []string{"--human"}),
+        command_json("help-json", "this catalog", []string{}, []string{}),
+        command_json("feedback", "send feedback to the relay; exits 0 even if delivery fails", []string{"message"}, []string{"-kind KIND", "-context TEXT", "-reporter NAME"}),
+        command_json("version", "the version", []string{}, []string{})
     }
     h = "{\"ok\":true,\"version\":" + json(version()) + ",\"output\":\"json\",\"commands\":{" + join(c, ",") + "}" +
         ",\"global_flags\":[\"--json\",\"--yes\",\"-y\",\"--no-interactive\"]" +
         ",\"exit_codes\":{\"0\":\"success\",\"80\":\"invalid arguments\",\"85\":\"invalid argument value or unsafe request\",\"92\":\"resource not found or not writable\",\"105\":\"publish failed (external)\"}" +
-        ",\"env\":[\"HOME\",\"HART_URL\",\"HART_READ_KEY\"],\"see_also\":[\"guide\"]}"
+        ",\"env\":[\"HOME\",\"HART_URL\",\"HART_READ_KEY\",\"FEEDBACK_RELAY\"],\"see_also\":[\"guide\"]}"
 }

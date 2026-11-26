@@ -28,10 +28,16 @@ Agents working in this repo: see [AGENTS.md](AGENTS.md) and the
 
 ## Feedback
 
-`bin/diagrun guide` includes a curl command that sends feedback to
-`https://feedback.intrane.fr`. This is not full
-[cli-feedback-spec](https://github.com/javimosch/cli-feedback-spec) adoption:
-there is no `diagrun feedback` command.
+```sh
+bin/diagrun feedback "what happened" -kind bug -context "what you were doing"
+```
+
+Follows the relay-only variant of
+[cli-feedback-spec](https://github.com/javimosch/cli-feedback-spec): one POST to
+`FEEDBACK_RELAY` (default `https://feedback.intrane.fr`, `off` disables it), a
+fresh `id`, and exit 0 even when delivery fails (see `data.relayed`). Needs
+`curl`. One deliberate departure from a SHOULD: the reporter defaults to
+`agent`, not `$USER`; set it with `-reporter`.
 
 ## Differences from the original
 
@@ -73,9 +79,10 @@ seen.
 - Tests use synthetic transcripts. It has also been run on real ones, but its
   trigger markers are not verified against a format specification.
 - Needs [machin](https://github.com/javimosch/machin) and a C compiler to build.
-- [cli-specs](https://cli-specs.intrane.fr/): `output` and `guide` adopted
-  (`cli-spec-conformance` passes all its checks for both). `feedback`, `update`
-  and `install` are not implemented; there is deliberately no telemetry.
+- [cli-specs](https://cli-specs.intrane.fr/): `output`, `guide` and relay-only
+  `feedback` are adopted. `cli-spec-conformance` passes all its checks for the
+  first two; it has none for `feedback`, which the tests cover. `update` and
+  `install` are not implemented; there is deliberately no telemetry.
 
 ## Tests and memory
 

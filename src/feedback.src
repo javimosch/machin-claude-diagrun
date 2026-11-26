@@ -1,0 +1,61 @@
+// feedback: cli-feedback-spec, relay-only variant (no local endpoint). One
+// attempt, never fails the caller, FEEDBACK_RELAY=off disables the write.
+
+func max_feedback_bytes() (n) { n = 8000 }
+
+func relay_base() (b) {
+    b = env("FEEDBACK_RELAY")
+    if b == "" { b = "https://feedback.intrane.fr" }
+    for has_suffix(b, "/") { b = substr(b, 0, len(b) - 1) }
+}
+
+// json_quote (vendor/json.src) escapes control bytes; inputs are size-capped.
+func feedback_body(id, kind, message, context, reporter) (b) {
+    b = "{\"id\":" + json_quote(id) + ",\"app\":\"diagrun\",\"version\":" + json_quote(version()) +
+        ",\"kind\":" + json_quote(kind) + ",\"message\":" + json_quote(message) +
+        ",\"context\":" + json_quote(context) + ",\"reporter\":" + json_quote(reporter) + "}"
+}
+
+type Ack struct { ok bool }
+
+// send_relay returns "" once the relay confirms the record, else the reason.
+func send_relay(base, body) (why) {
+    cmd := "curl -sS -m 15 -H 'content-type: application/json' --data-binary " + shell_quote(body) +
+        " -w '\\n%{http_code}' " + shell_quote(base + "/v1/feedback")
+    code, out, errout := exec(cmd)
+    if code != 0 {
+        why = trim(errout)
+        if why == "" { why = "curl exited " + str(code) }
+        return why
+    }
+    lines := split(trim(out), "\n")
+    status := lines[len(lines) - 1]
+    why = "relay answered HTTP " + status
+    if has_prefix(status, "2") && len(lines) > 1 {
+        reply := trim(lines[0])
+        if has_prefix(reply, "{") {
+            ack := parse(reply, Ack{})
+            if ack.ok { why = "" }
+        }
+    }
+}
+
+func run_feedback(o) {
+    message := trim(o.message)
+    if message == "" { die(80, "invalid_argument", "feedback needs a message", []string{"diagrun feedback \"what happened\" -kind bug"}) }
+    if len(message) + len(o.context) + len(o.kind) + len(o.reporter) > max_feedback_bytes() { bad_value("feedback is limited to " + str(max_feedback_bytes()) + " bytes in total", "shorten the message or -context") }
+    id := to_hex(rand_bytes(16))
+    relayed := 0
+    why := "disabled by FEEDBACK_RELAY=off"
+    base := relay_base()
+    if base != "off" {
+        why = send_relay(base, feedback_body(id, o.kind, message, o.context, o.reporter))
+        if why == "" { relayed = 1 }
+    }
+    out := "{\"ok\":true,\"data\":{\"id\":" + json_quote(id) + ",\"stored\":0,\"relayed\":" + str(relayed)
+    if relayed == 0 {
+        out = out + ",\"reason\":" + json_quote(why)
+        eprintln("diagrun: feedback not delivered: " + why)
+    }
+    println(out + "}}")
+}
