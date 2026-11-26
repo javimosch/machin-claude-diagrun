@@ -3,9 +3,16 @@
 Where did your Claude Code tokens go? Agent-first and CLI-first: one native
 binary, JSON on stdout, optional HTML report on [hart](https://hart.intrane.fr).
 
-A clean reimplementation in machin of the idea in
-[Francoisnollet/diagrun](https://github.com/Francoisnollet/diagrun) (MIT). Its
-task-class heuristic and thresholds are the starting point here.
+**[Site](https://javimosch.github.io/machin-claude-diagrun/)** ·
+**[Original project: diagrun](https://github.com/Francoisnollet/diagrun)**
+
+## Origin
+
+Inspired by [diagrun](https://github.com/Francoisnollet/diagrun) by François
+Nollet (MIT), a zero-dependency Node CLI. This is a new implementation in
+machin, **not a clean-room one**: its source was read first, and the task-class
+rules, their patterns and several thresholds are adapted from it. See
+[LICENSE](LICENSE).
 
 ```sh
 ./build.sh

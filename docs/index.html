@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>machin-claude-diagrun</title>
+<meta name="description" content="Where did your Claude Code tokens go? An agent-first CLI in machin: cost by model, cache-write causes, idle rebuilds and HTML reports.">
+<style>
+:root{--bg:#f4f5f2;--card:#fff;--ink:#14202a;--mute:#566573;--line:#d9ddd6;--acc:#0d6b75;--code:#101a21;--codeink:#e4eef2}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1419;--card:#161f26;--ink:#e6eef2;--mute:#96a7b3;--line:#28343d;--acc:#52c4d0;--code:#080d11}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:820px;margin:0 auto;padding:48px 16px 72px}
+h1{margin:0;font:700 clamp(26px,6vw,40px)/1.15 ui-monospace,Menlo,Consolas,monospace;letter-spacing:-.02em;overflow-wrap:anywhere}
+h2{margin:44px 0 10px;font-size:20px}
+.lead{font-size:19px;color:var(--mute);margin:12px 0 22px}
+a{color:var(--acc)}
+.links{display:flex;flex-wrap:wrap;gap:10px}
+.links a{border:1px solid var(--acc);border-radius:6px;padding:7px 14px;text-decoration:none;font-weight:600}
+.links a:first-child{background:var(--acc);color:var(--bg)}
+pre{background:var(--code);color:var(--codeink);border-radius:8px;padding:14px 16px;overflow-x:auto;font-size:13.5px;line-height:1.7}
+code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.9em}
+.table{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:14.5px}
+th,td{text-align:left;vertical-align:top;padding:9px 12px;border-bottom:1px solid var(--line)}
+tr:last-child td{border-bottom:0}
+.origin{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--acc);border-radius:8px;padding:4px 18px;margin-top:44px}
+.origin h2{margin-top:14px}
+footer{margin-top:44px;color:var(--mute);font-size:14px}
+</style>
+</head>
+<body>
+<main>
+<h1>machin-claude-diagrun</h1>
+<p class="lead">Where did your Claude Code tokens go? One native binary reads your local transcripts and answers in JSON, or as an HTML report.</p>
+<nav class="links">
+<a href="https://github.com/javimosch/machin-claude-diagrun">Source</a>
+<a href="https://github.com/Francoisnollet/diagrun">Inspired by diagrun</a>
+<a href="https://github.com/javimosch/machin">Built with machin</a>
+</nav>
+
+<h2>Quick start</h2>
+<p>You need <a href="https://github.com/javimosch/machin">machin</a> and a C compiler.</p>
+<pre><code>git clone https://github.com/javimosch/machin-claude-diagrun
+cd machin-claude-diagrun &amp;&amp; ./build.sh
+bin/diagrun guide --human
+bin/diagrun scan --days 7           # JSON
+bin/diagrun report --days 7         # ~/.diagrun/report.html</code></pre>
+
+<h2>What it measures</h2>
+<div class="table"><table>
+<tr><th>Section</th><th>Question it answers</th></tr>
+<tr><td>Spend</td><td>What did each model cost at API list price, in the main conversation and in subagents?</td></tr>
+<tr><td>Cache writes</td><td>Was each write a first fill, new content, or a rebuild?</td></tr>
+<tr><td>Idle rebuilds</td><td>How long was the pause, and what arrived before the next request?</td></tr>
+<tr><td>Model fit</td><td>Which prompts might a cheaper model have handled? A lower figure and a ceiling.</td></tr>
+<tr><td>Long context</td><td>What did re-reading beyond 100k and 150k tokens cost, at most?</td></tr>
+<tr><td>Repeated work</td><td>Unchanged re-reads, repeated commands and very large tool results.</td></tr>
+</table></div>
+<p>Causes, task classes and triggers are <strong>inferred</strong> from token counts, timestamps and known transcript markers. Savings figures overlap, so do not add them. Prices are built into the binary and can go out of date.</p>
+
+<h2>Made for agents</h2>
+<p><code>guide</code> and <code>help-json</code> describe the tool from the binary alone. Data goes to stdout; errors are typed, carry suggestions and use distinct exit codes. It follows the <code>output</code> and <code>guide</code> conventions of <a href="https://cli-specs.intrane.fr/">cli-specs</a>. <code>feedback</code>, <code>update</code> and <code>install</code> are not implemented, and there is no telemetry.</p>
+
+<h2>Privacy</h2>
+<ul>
+<li>By default, output holds no prompt text, file names or commands.</li>
+<li><code>--examples</code> adds them. Commands may contain secrets.</li>
+<li>The network is used only by <code>report --publish</code>, which uploads to <a href="https://hart.intrane.fr">hart</a>.</li>
+<li>Publishing with examples requires <code>--private</code> and a read key. An unlisted page is readable by anyone with its link.</li>
+</ul>
+
+<h2>Large histories</h2>
+<p>Transcripts are read in 4 MB chunks. On synthetic input, a single 1.6 GB file peaked at 640 MB of memory and took 13 s. Memory still grows with the number of lines. To run under a hard limit on Linux with systemd:</p>
+<pre><code>CAP=2G LIMIT=300 tests/capped.sh bin/diagrun scan --days 7</code></pre>
+
+<section class="origin">
+<h2>Origin</h2>
+<p>The idea comes from <a href="https://github.com/Francoisnollet/diagrun">diagrun</a> by François Nollet (MIT), a zero-dependency Node CLI that turns Claude Code logs into a readable diagnosis in French.</p>
+<p>This is a new implementation in machin. It is <strong>not a clean-room implementation</strong>: the original source was read first, and the task-class rules, their patterns and several thresholds are adapted from it.</p>
+<p>What is different here: JSON-first output, newer model prices, separate subagent spend, de-duplication of copied messages, cache-write causes, and prompts left out unless requested.</p>
+</section>
+
+<footer>MIT licence. Not affiliated with Anthropic.</footer>
+</main>
+</body>
+</html>
