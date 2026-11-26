@@ -21,7 +21,8 @@ func guide_loop() (l) {
         "diagrun scan --days 7",
         "start with the largest of parts.cache_write, parts.cache_read and parts.output",
         "if cache writes matter, read cache_writes.rows, then cache_writes.idle",
-        "diagrun report --days 7 for an HTML page; add --publish --owner NAME only when asked to share it",
+        "diagrun report --days 7 for a local HTML page, when the user wants a report to read or share",
+        "agents: never add --publish without the user's explicit yes to this upload; ask for the owner name and whether it should be private",
         "change one habit, scan again a week later and compare shares of totals.usd"
     }
 }
@@ -60,6 +61,7 @@ func guide_examples() (r) {
 func guide_gotchas() (g) {
     g = []string{
         "default output holds no prompt text, file names or commands; --examples adds them, and commands may contain secrets",
+        "agents: ask before every publish (a request for a report is not permission to upload), never guess --owner, and keep --examples off unless asked",
         "publishing with --examples requires --private and HART_READ_KEY",
         "an unlisted hart page is readable by anyone who has the link",
         "model_fit, context and idle rebuild figures overlap: never add them",

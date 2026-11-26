@@ -234,6 +234,7 @@ with tempfile.TemporaryDirectory() as home:
     check("catalog", (sorted(cat["commands"]), cat["env"]), (["guide", "help-json", "report", "scan", "version"], ["HOME", "HART_URL", "HART_READ_KEY"]))
     g = json.loads(run(home, "guide").stdout)
     check("guide keys", [k for k in ("diagrun", "one_liner", "model", "loop", "concepts", "commands", "examples", "gotchas") if k not in g], [])
+    check("guide asks before publish", any("ask before every publish" in x for x in g["gotchas"]), True)
     check("guide version", g["version"], cat["version"])
     human = run(home, "guide", "--human").stdout
     check("human has every gotcha", all(x in human for x in g["gotchas"]), True)

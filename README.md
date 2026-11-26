@@ -23,6 +23,9 @@ bin/diagrun report --publish --owner you  # upload to hart (unlisted)
 HART_READ_KEY=... bin/diagrun report --examples --publish --owner you --private
 ```
 
+Agents working in this repo: see [AGENTS.md](AGENTS.md) and the
+[diagrun skill](.claude/skills/diagrun/SKILL.md). They ask before publishing.
+
 ## Differences from the original
 
 - Prices per model generation, including Fable, with 5 min and 1 h cache writes.
