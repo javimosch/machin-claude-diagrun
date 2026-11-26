@@ -1,0 +1,453 @@
+// load: read Claude Code transcripts (one JSON object per line) into turns and
+// deduplicated API messages.
+
+type CacheTtl struct { ephemeral_5m_input_tokens int  ephemeral_1h_input_tokens int }
+type Usage struct { input_tokens int  output_tokens int  cache_creation_input_tokens int  cache_read_input_tokens int  cache_creation CacheTtl }
+type ApiMsg struct { id string  model string  usage Usage }
+type Line struct { uuid string  timestamp string  sessionId string  isMeta bool  isSidechain bool  message ApiMsg }
+
+type Msg struct { trigger string  model string  turn int  sub bool  sid string  scope string  at int  tin int  tout int  w5 int  w1 int  cr int }
+type Turn struct { sid string  prompt string  tools int  edits int  spawned bool  readonly bool }
+type Count struct { name string  n int }
+
+// Store holds everything the analysis needs. Maps are reference types; the
+// slices are reassigned through the returned value.
+type Store struct {
+    msgs []Msg
+    turns []Turn
+    msg_at map[string]int
+    seen_line map[string]bool
+    tool_name map[string]string
+    edited map[string]bool
+    generation map[string]int
+    cmd_text map[string]string
+    pending map[string]string
+    armed map[string]bool
+    cur map[string]int
+    reads map[string]int
+    cmds map[string]int
+    big map[string]int
+    clears map[string]int
+    files int
+    bad_lines int
+}
+
+func new_store() (s) {
+    s = Store{msgs: []Msg{}, turns: []Turn{}, msg_at: make(map[string]int), seen_line: make(map[string]bool), tool_name: make(map[string]string), edited: make(map[string]bool), generation: make(map[string]int), cmd_text: make(map[string]string), pending: make(map[string]string), armed: make(map[string]bool), cur: make(map[string]int), reads: make(map[string]int), cmds: make(map[string]int), big: make(map[string]int), clears: make(map[string]int), files: 0, bad_lines: 0}
+}
+
+type Str struct { v string }
+
+// unquote decodes a JSON string literal with the native parser. The framework's
+// json_unquote concatenates byte by byte, which is quadratic in memory.
+func unquote(raw) (v) {
+    d := parse("{\"v\":" + raw + "}", Str{})
+    v = "" + d.v
+}
+
+// field returns a string field by path, "" when absent.
+func field(doc, path) (v) {
+    raw, err := json_get(doc, path)
+    v = ""
+    if err == "" {
+        if has_prefix(raw, "\"") { v = unquote(raw) }
+    }
+}
+
+// items splits a raw JSON array into its raw elements.
+func items(raw) (out) {
+    out = []string{}
+    if !has_prefix(raw, "[") { return out }
+    i := 0
+    for i >= 0 {
+        el, err := json_get(raw, ".[" + str(i) + "]")
+        if err != "" { return out }
+        out = append(out, el)
+        i = i + 1
+    }
+}
+
+// text_of flattens a content value (string or array of blocks) to its text.
+func text_of(raw) (t) {
+    t = ""
+    if has_prefix(raw, "\"") {
+        t = unquote(raw)
+        return t
+    }
+    for _, b := range items(raw) {
+        if field(b, ".type") == "text" { t = t + field(b, ".text") + "\n" }
+    }
+}
+
+// strip_tag removes every <tag ...>...</tag> span; an unclosed one drops the rest.
+func strip_tag(t, tag) (out) {
+    out = t
+    for contains(out, "<" + tag) {
+        a := index(out, "<" + tag)
+        rest := substr(out, a, len(out))
+        b := index(rest, "</" + tag + ">")
+        if b < 0 {
+            out = substr(out, 0, a)
+            return out
+        }
+        out = substr(out, 0, a) + " " + substr(rest, b + len(tag) + 3, len(rest))
+    }
+}
+
+// clean_prompt keeps only what the human typed.
+func clean_prompt(t) (out) {
+    out = strip_tag(t, "system-reminder")
+    out = strip_tag(out, "pasted_content")
+    out = strip_tag(out, "ide_opened_file")
+    out = strip_tag(out, "ide_selection")
+    out = trim(replace(replace(out, "\n", " "), "\t", " "))
+}
+
+// Ev is the compact form of one transcript line. It is all that leaves the
+// per-line arena.
+type Call struct { id string  name string  path string  span string  cmd_hash string  cmd string }
+type Res struct { id string  size int }
+type Ev struct {
+    kind string
+    uuid string
+    sid string
+    sub bool
+    prompt string
+    cleared bool
+    trigger string
+    result_id string
+    at int
+    id string
+    model string
+    tin int
+    tout int
+    w5 int
+    w1 int
+    cr int
+    calls []Call
+    results []Res
+}
+
+// extract_user fills tool result sizes, /clear, or a typed prompt.
+func extract_user(ev, line, meta) (r) {
+    r = ev
+    content, err := json_get(line, ".message.content")
+    if err != "" { return r }
+    if has_prefix(content, "[") {
+        is_result := false
+        for _, b := range items(content) {
+            if field(b, ".type") == "tool_result" {
+                is_result = true
+                r.result_id = field(b, ".tool_use_id")
+                body, berr := json_get(b, ".content")
+                // the raw form is never shorter than the text: skip small ones
+                if berr == "" {
+                    if len(body) >= 20000 {
+                        size := len(text_of(body))
+                        if size >= 20000 { r.results = append(r.results, Res{id: field(b, ".tool_use_id"), size: size}) }
+                    }
+                }
+            }
+        }
+        if is_result { return r }
+    }
+    flat := trim(text_of(content))
+    r.trigger = text_trigger(flat, meta, r.sub)
+    if r.sub || meta { return r }
+    if contains(flat, "<command-name>/clear") {
+        r.cleared = true
+        return r
+    }
+    for _, p := range []string{"<command-name>", "<command-message>", "<local-command", "<task-notification>", "Caveat:", "[Request interrupted"} {
+        if has_prefix(flat, p) { return r }
+    }
+    // classification only needs the head of a very long prompt
+    r.prompt = clip(clean_prompt(clip(flat, 20000)), 2000)
+}
+
+func extract_calls(ev, line) (r) {
+    r = ev
+    content, err := json_get(line, ".message.content")
+    if err != "" { return r }
+    if !contains(content, "tool_use") { return r }
+    for _, b := range items(content) {
+        if field(b, ".type") != "tool_use" { continue }
+        name := field(b, ".name")
+        path := field(b, ".input.file_path")
+        if path == "" { path = field(b, ".input.notebook_path") }
+        span := ""
+        if name == "Read" {
+            offset, oerr := json_get(b, ".input.offset")
+            limit, lerr := json_get(b, ".input.limit")
+            if oerr != "" { offset = "" }
+            if lerr != "" { limit = "" }
+            span = offset + ":" + limit
+        }
+        cmd := ""
+        hash := ""
+        if name == "Bash" {
+            full := trim(field(b, ".input.command"))
+            if len(full) > 8 {
+                hash = sha256(full)
+                cmd = clip(replace(replace(full, "\n", " "), "\t", " "), 90)
+            }
+        }
+        r.calls = append(r.calls, Call{id: field(b, ".id"), name: name, path: path, span: span, cmd_hash: hash, cmd: cmd})
+    }
+}
+
+func extract(line, path, file_sub, cutoff) (ev) {
+    ev = Ev{kind: "", calls: []Call{}, results: []Res{}}
+    if !has_prefix(line, "{") { return ev }
+    if !contains(line, "\"type\":\"assistant\"") && !contains(line, "\"type\":\"user\"") { return ev }
+    kind := field(line, ".type")
+    if kind != "assistant" && kind != "user" { return ev }
+    e := parse(line, Line{})
+    if e.timestamp == "" {
+        ev.kind = "bad"
+        return ev
+    }
+    // both sides are ISO-8601 UTC, so string order is time order
+    if e.timestamp < cutoff { return ev }
+    ev.kind = kind
+    ev.at = epoch_of("" + e.timestamp)
+    ev.uuid = "" + e.uuid
+    ev.sid = "" + e.sessionId
+    if ev.sid == "" { ev.sid = path }
+    ev.sub = file_sub || e.isSidechain
+    if kind == "user" {
+        ev = extract_user(ev, line, e.isMeta)
+        return ev
+    }
+    if e.message.model == "<synthetic>" {
+        ev.kind = ""
+        return ev
+    }
+    u := e.message.usage
+    ev.id = "" + e.message.id
+    if ev.id == "" { ev.id = ev.uuid }
+    ev.model = "" + e.message.model
+    ev.tin = u.input_tokens
+    ev.tout = u.output_tokens
+    ev.w5 = u.cache_creation.ephemeral_5m_input_tokens
+    ev.w1 = u.cache_creation.ephemeral_1h_input_tokens
+    if ev.w5 + ev.w1 == 0 { ev.w5 = u.cache_creation_input_tokens }
+    ev.cr = u.cache_read_input_tokens
+    ev = extract_calls(ev, line)
+}
+
+func chunk_size() (n) { n = 4194304 }
+
+// read_chunk handles the whole lines in [off, off+want) and returns how many
+// bytes it consumed: 0 when no line ends inside the range.
+func read_chunk(path, off, want, last, file_sub, cutoff, ch) (used) {
+    text := bytes_str(read_file_at(path, off, want))
+    lines := split(text, "\n")
+    keep := len(lines)
+    used = len(text)
+    // the final piece is a partial line unless the file ends here
+    if !last {
+        keep = keep - 1
+        used = used - len(lines[keep])
+    }
+    i := 0
+    for i < keep {
+        arena {
+            ev := extract(lines[i], path, file_sub, cutoff)
+            if ev.kind != "" { ch <- ev }
+        }
+        i = i + 1
+    }
+}
+
+// read_events runs as one goroutine per file. Memory does not grow with the
+// file: each chunk's arena is freed before the next is read, and each line's
+// temporaries when its block ends. Channel sends are deep copies, so events
+// outlive both. A line longer than a chunk widens the window until it fits.
+func read_events(path, cutoff, ch) {
+    file_sub := contains(path, "/subagents/")
+    total := file_size(path)
+    off := 0
+    want := chunk_size()
+    for off < total {
+        used := 0
+        last := off + want >= total
+        arena {
+            used = read_chunk(path, off, want, last, file_sub, cutoff, ch)
+        }
+        if used > 0 {
+            off = off + used
+            want = chunk_size()
+        } else if last {
+            // unreadable, truncated meanwhile, or cut at a NUL byte
+            break
+        } else {
+            want = want * 2
+        }
+    }
+    ch <- Ev{kind: "end", calls: []Call{}, results: []Res{}}
+}
+
+func is_edit_tool(n) (b) { b = n == "Edit" || n == "Write" || n == "MultiEdit" || n == "NotebookEdit" }
+
+func is_read_tool(n) (b) { b = n == "Read" || n == "Grep" || n == "Glob" || n == "LS" || n == "WebFetch" || n == "WebSearch" }
+
+// on_tool_use records one tool call against the turn at index ti (-1 = none).
+// scope keys waste detection to one context window: a session, or one subagent.
+func on_tool_use(s, call, scope, ti) (r) {
+    r = s
+    cid := "" + call.id
+    if has(s.tool_name, cid) { return r }
+    name := call.name
+    s.tool_name[cid] = name
+    file := scope + "\t" + call.path
+    if name == "Read" {
+        // the generation moves on each edit, so a read after an edit is new
+        key := file + "\t" + call.span + "\t" + str(s.generation[file])
+        s.reads[key] = s.reads[key] + 1
+    }
+    if call.cmd_hash != "" {
+        key := scope + "\t" + call.cmd_hash
+        s.cmds[key] = s.cmds[key] + 1
+        h := "" + call.cmd_hash
+        s.cmd_text[h] = call.cmd
+    }
+    if is_edit_tool(name) { s.generation[file] = s.generation[file] + 1 }
+    if ti < 0 { return r }
+    t := s.turns[ti]
+    t.tools = t.tools + 1
+    if name == "Agent" || name == "Task" { t.spawned = true }
+    if !is_read_tool(name) { t.readonly = false }
+    if is_edit_tool(name) {
+        key := str(ti) + "\t" + call.path
+        if !has(s.edited, key) {
+            s.edited[key] = true
+            t.edits = t.edits + 1
+        }
+    }
+    s.turns[ti] = t
+}
+
+func imax(a, b) (m) {
+    m = a
+    if b > a { m = b }
+}
+
+// on_assistant merges the streamed lines of one API message (same id, growing
+// usage), so each message is billed once even when copied into a resumed file.
+func on_assistant(s, ev, scope) (r) {
+    r = s
+    sess := "" + ev.sid
+    ti := s.cur[sess] - 1
+    if ev.sub { ti = -1 }
+    mid := "" + ev.id
+    at := s.msg_at[mid] - 1
+    if at < 0 {
+        why := s.pending[scope]
+        if why == "" { why = "no_new_input" }
+        // a loop's own prompt looks typed: the wakeup call before it tells
+        if s.armed[scope] && (why == "typed_prompt" || why == "system_injected" || why == "no_new_input") { why = "after_scheduled_wakeup" }
+        delete(s.pending, scope)
+        s.msgs = append(s.msgs, Msg{trigger: why, model: ev.model, turn: ti, sub: ev.sub, sid: ev.sid, scope: scope, at: ev.at, tin: ev.tin, tout: ev.tout, w5: ev.w5, w1: ev.w1, cr: ev.cr})
+        s.msg_at[mid] = len(s.msgs)
+    } else {
+        m := s.msgs[at]
+        m.tin = imax(m.tin, ev.tin)
+        m.tout = imax(m.tout, ev.tout)
+        m.w5 = imax(m.w5, ev.w5)
+        m.w1 = imax(m.w1, ev.w1)
+        m.cr = imax(m.cr, ev.cr)
+        s.msgs[at] = m
+    }
+    for _, call := range ev.calls {
+        // armed until the window calls any other tool
+        s.armed[scope] = call.name == "ScheduleWakeup"
+        s = on_tool_use(s, call, scope, ti)
+    }
+    r = s
+}
+
+func apply(s, ev, path) (r) {
+    r = s
+    if ev.kind == "bad" {
+        s.bad_lines = s.bad_lines + 1
+        r = s
+        return r
+    }
+    uid := "" + ev.uuid
+    if uid != "" {
+        if has(s.seen_line, uid) { return r }
+        s.seen_line[uid] = true
+    }
+    if ev.kind == "assistant" {
+        scope := ev.sid
+        if ev.sub { scope = path }
+        r = on_assistant(s, ev, scope)
+        return r
+    }
+    window := "" + ev.sid
+    if ev.sub { window = path }
+    why := "" + ev.trigger
+    answered := "" + ev.result_id
+    if answered != "" { why = result_trigger(s.tool_name[answered]) }
+    if why != "" {
+        if s.pending[window] == "" || trigger_rank(why) >= trigger_rank(s.pending[window]) { s.pending[window] = why }
+    }
+    for _, res := range ev.results {
+        rid := "" + res.id
+        name := s.tool_name[rid]
+        if name == "" { name = "?" }
+        s.big[name] = s.big[name] + 1
+    }
+    csid := "" + ev.sid
+    if ev.cleared {
+        s.clears[csid] = s.clears[csid] + 1
+        s.cur[csid] = 0
+    }
+    if ev.prompt != "" {
+        s.turns = append(s.turns, Turn{sid: ev.sid, prompt: ev.prompt, tools: 0, edits: 0, spawned: false, readonly: true})
+        s.cur[csid] = len(s.turns)
+    }
+    r = s
+}
+
+func load_file(s, path, cutoff) (r) {
+    s.files = s.files + 1
+    ch := make(chan Ev)
+    go read_events(path, cutoff, ch)
+    for {
+        ev := <-ch
+        if ev.kind == "end" { break }
+        s = apply(s, ev, path)
+    }
+    r = s
+}
+
+type FileRef struct { path string  mtime int }
+
+// walk collects *.jsonl files modified since `since`, without following symlinks.
+func walk(dir, since, out) (r) {
+    r = out
+    for _, name := range list_dir(dir) {
+        p := dir + "/" + name
+        if is_symlink(p) { continue }
+        kind, size, mtime := stat(p)
+        if kind == 2 {
+            r = walk(p, since, r)
+        } else if kind == 1 {
+            if has_suffix(name, ".jsonl") {
+                if mtime >= since && size > 0 { r = append(r, FileRef{path: p, mtime: mtime}) }
+            }
+        }
+    }
+}
+
+// load_all reads oldest files first, so an original wins over a resumed copy.
+func load_all(root, days) (s) {
+    since := now() - days * 86400
+    cutoff := time_format_utc(since, "%Y-%m-%dT%H:%M:%S")
+    files := walk(root, since, []FileRef{})
+    files = sort_by(files, func(a, b) { return a.mtime < b.mtime })
+    s = new_store()
+    for _, f := range files { s = load_file(s, f.path, cutoff) }
+}

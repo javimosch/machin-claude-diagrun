@@ -1,0 +1,281 @@
+// analyze: classify turns and compute where the money went.
+
+type ModelRow struct { model string  usd float  share float  messages int }
+type KindRow struct { kind string  from string  to string  turns int  usd_saved_max float }
+type Example struct { kind string  from string  to string  usd_saved_max float  prompt string }
+type Totals struct { usd float  turns int  sessions int  messages int  main_usd float  subagent_usd float  input_tokens int  output_tokens int  cache_write_5m_tokens int  cache_write_1h_tokens int  cache_read_tokens int }
+type CostParts struct { input float  output float  cache_write float  cache_read float }
+type ModelFit struct { per_turn_ceiling_usd float  whole_session_usd float  whole_sessions int  by_kind []KindRow }
+type ContextCost struct { over_150k_usd float  over_100k_usd float  messages_over_100k int  marathon_sessions int }
+type Waste struct { unchanged_rereads int  repeated_commands int  big_results []Count }
+type Detail struct { examples []Example  rereads []Count  commands []Count }
+type Report struct {
+    version string
+    days int
+    generated string
+    files int
+    totals Totals
+    parts CostParts
+    cache_writes CacheWrites
+    models []ModelRow
+    unpriced []Count
+    model_fit ModelFit
+    context ContextCost
+    waste Waste
+    detail Detail
+}
+
+func word(text, pattern) (b) { b = regex_match(text, "(^|[^a-z])(" + pattern + ")($|[^a-z])") }
+
+// classify is a heuristic over the prompt and what the turn actually did.
+// First match wins.
+func classify(t, out_tokens, peak) (k) {
+    p := to_lower(t.prompt)
+    hard := regex_match(p, "architect|refactor|redesign|migrat|investigat|root cause|pourquoi|conçoi|concoi|stratég|sécurit|security|performance|debug|race condition|from scratch|implement|implém")
+    if hard || t.edits >= 5 || t.spawned || out_tokens > 8000 { k = "complex" }
+    else if t.tools == 0 && peak >= 40000 { k = "followup" }
+    else if t.tools == 0 && regex_match(p, "rédige|redige|écris|draft|write|prospect|e-?mail|brouillon|traduis|translate|résume|summari[sz]e") { k = "medium" }
+    else if t.tools == 0 && out_tokens < 1500 { k = "short_question" }
+    else if t.edits == 0 && t.readonly && t.tools <= 10 && t.tools > 0 { k = "exploration" }
+    else if t.edits == 0 && word(p, "commit|push|pull request|pr|git (status|log|diff)") { k = "git_command" }
+    else if t.edits <= 2 && out_tokens < 3000 && t.tools <= 8 { k = "small_fix" }
+    else { k = "medium" }
+}
+
+// target_of: rank of the cheapest tier judged sufficient, -1 = keep the model.
+func target_of(kind) (rank) {
+    rank = -1
+    if kind == "short_question" || kind == "exploration" || kind == "git_command" || kind == "small_fix" { rank = 0 }
+    if kind == "medium" { rank = 1 }
+}
+
+func target_model(table, rank) (p) {
+    name := "haiku-5-5"
+    if rank == 1 { name = "sonnet-5-5" }
+    p = table[price_index(table, name)]
+}
+
+func msg_cost(p, m) (c) { c = cost_usd(p, m.tin, m.tout, m.w5, m.w1, m.cr) }
+
+func top_counts(m, floor, limit) (out) {
+    all := []Count{}
+    for _, k := range keys(m) {
+        if m[k] >= floor { all = append(all, Count{name: k, n: m[k]}) }
+    }
+    all = sort_by(all, func(a, b) { return a.n > b.n || (a.n == b.n && a.name < b.name) })
+    out = []Count{}
+    for i, c := range all {
+        if i < limit { out = append(out, c) }
+    }
+}
+
+// file_labels reduces a re-read key to the file's base name.
+func file_labels(rows) (out) {
+    out = []Count{}
+    for _, c := range rows {
+        seg := split(split(c.name, "	")[1], "/")
+        out = append(out, Count{name: clip(seg[len(seg) - 1], 90), n: c.n})
+    }
+}
+
+// clip cuts at n bytes without splitting a UTF-8 character.
+func clip(t, n) (out) {
+    if len(t) <= n { return t }
+    b := bytes(t)
+    end := n
+    for end > 0 {
+        c := byte_at(b, end)
+        if c < 128 || c >= 192 { break }
+        end = end - 1
+    }
+    out = substr(t, 0, end) + "…"
+}
+
+func analyze(s, days, version, examples) (rep) {
+    table := prices()
+    n := len(s.turns)
+    turn_usd := []float{}
+    turn_out := []int{}
+    turn_peak := []int{}
+    turn_model := []int{}
+    turn_best := []float{}
+    i := 0
+    for i < n {
+        turn_usd = append(turn_usd, 0.0)
+        turn_out = append(turn_out, 0)
+        turn_peak = append(turn_peak, 0)
+        turn_model = append(turn_model, -1)
+        turn_best = append(turn_best, 0.0)
+        i = i + 1
+    }
+
+    tot := Totals{}
+    parts := CostParts{}
+    ctx := ContextCost{}
+    by_usd := make(map[string]float)
+    by_n := make(map[string]int)
+    unpriced := make(map[string]int)
+    sessions := make(map[string]bool)
+    peak_by_sid := make(map[string]int)
+
+    for _, m := range s.msgs {
+        pi := price_index(table, m.model)
+        if pi < 0 {
+            unpriced[m.model] = unpriced[m.model] + 1
+            continue
+        }
+        p := table[pi]
+        c := msg_cost(p, m)
+        size := m.tin + m.w5 + m.w1 + m.cr
+        rate := tier_of(p, size)
+        sessions[m.sid] = true
+        tot.usd = tot.usd + c
+        tot.messages = tot.messages + 1
+        tot.input_tokens = tot.input_tokens + m.tin
+        tot.output_tokens = tot.output_tokens + m.tout
+        tot.cache_write_5m_tokens = tot.cache_write_5m_tokens + m.w5
+        tot.cache_write_1h_tokens = tot.cache_write_1h_tokens + m.w1
+        tot.cache_read_tokens = tot.cache_read_tokens + m.cr
+        parts.input = parts.input + cost_at(rate, m.tin, 0, 0, 0, 0)
+        parts.output = parts.output + cost_at(rate, 0, m.tout, 0, 0, 0)
+        parts.cache_write = parts.cache_write + cost_at(rate, 0, 0, m.w5, m.w1, 0)
+        parts.cache_read = parts.cache_read + cost_at(rate, 0, 0, 0, 0, m.cr)
+        by_usd[m.model] = by_usd[m.model] + c
+        by_n[m.model] = by_n[m.model] + 1
+        if m.sub { tot.subagent_usd = tot.subagent_usd + c } else { tot.main_usd = tot.main_usd + c }
+        // excess context, assumed re-read from cache. Applies to any context
+        // window, subagents included.
+        if size > 100000 {
+            ctx.messages_over_100k = ctx.messages_over_100k + 1
+            ctx.over_100k_usd = ctx.over_100k_usd + float(size - 100000) * rate.read / 1000000.0
+        }
+        if size > 150000 { ctx.over_150k_usd = ctx.over_150k_usd + float(size - 150000) * rate.read / 1000000.0 }
+        if m.turn >= 0 {
+            ti := m.turn
+            turn_usd[ti] = turn_usd[ti] + c
+            turn_out[ti] = turn_out[ti] + m.tout
+            turn_peak[ti] = imax(turn_peak[ti], size)
+            peak_by_sid[m.sid] = imax(peak_by_sid[m.sid], size)
+            // the turn's model is its most expensive message's model
+            if c >= turn_best[ti] {
+                turn_best[ti] = c
+                turn_model[ti] = pi
+            }
+        }
+    }
+
+    // second pass: what each turn would have cost on its target tier
+    kinds := []string{}
+    ranks := []int{}
+    for ti, t := range s.turns {
+        k := classify(t, turn_out[ti], turn_peak[ti])
+        kinds = append(kinds, k)
+        ranks = append(ranks, target_of(k))
+    }
+    alt := []float{}
+    for _, c := range turn_usd { alt = append(alt, c - c) }
+    for _, m := range s.msgs {
+        if m.turn < 0 { continue }
+        pi := price_index(table, m.model)
+        if pi < 0 { continue }
+        rank := ranks[m.turn]
+        c := msg_cost(table[pi], m)
+        if rank >= 0 {
+            if table[pi].rank > rank { c = msg_cost(target_model(table, rank), m) }
+        }
+        alt[m.turn] = alt[m.turn] + c
+    }
+
+    fit := ModelFit{by_kind: []KindRow{}}
+    row_at := make(map[string]int)
+    rows := []KindRow{}
+    found := []Example{}
+    sess_turns := make(map[string]int)
+    sess_blocked := make(map[string]bool)
+    sess_rank := make(map[string]int)
+    for ti, t := range s.turns {
+        mi := turn_model[ti]
+        if mi < 0 { continue }
+        tot.turns = tot.turns + 1
+        sess_turns[t.sid] = sess_turns[t.sid] + 1
+        rank := ranks[ti]
+        if rank < 0 {
+            sess_blocked[t.sid] = true
+            continue
+        }
+        sess_rank[t.sid] = imax(sess_rank[t.sid], rank)
+        saved := turn_usd[ti] - alt[ti]
+        if table[mi].rank <= rank || saved <= 0.0 { continue }
+        fit.per_turn_ceiling_usd = fit.per_turn_ceiling_usd + saved
+        from := table[mi].key
+        to := target_model(table, rank).key
+        key := kinds[ti] + "|" + from + "|" + to
+        at := row_at[key] - 1
+        if at < 0 {
+            rows = append(rows, KindRow{kind: kinds[ti], from: from, to: to, turns: 1, usd_saved_max: saved})
+            row_at[key] = len(rows)
+        } else {
+            row := rows[at]
+            row.turns = row.turns + 1
+            row.usd_saved_max = row.usd_saved_max + saved
+            rows[at] = row
+        }
+        if examples { found = append(found, Example{kind: kinds[ti], from: from, to: to, usd_saved_max: saved, prompt: clip(t.prompt, 90)}) }
+    }
+    fit.by_kind = sort_by(rows, func(a, b) { return a.usd_saved_max > b.usd_saved_max })
+
+    // whole sessions: every turn is simple enough, so the cheaper model could
+    // have been picked at the start, with no mid-conversation switch and no
+    // cache rebuild. Subagent spend is left unchanged.
+    whole := make(map[string]bool)
+    for _, sid := range keys(sess_turns) {
+        if !sess_blocked[sid] { whole[sid] = true }
+    }
+    gained := make(map[string]bool)
+    for _, m := range s.msgs {
+        if m.turn < 0 || !has(whole, m.sid) { continue }
+        pi := price_index(table, m.model)
+        if pi < 0 { continue }
+        rank := sess_rank[m.sid]
+        if table[pi].rank <= rank { continue }
+        saved := msg_cost(table[pi], m) - msg_cost(target_model(table, rank), m)
+        if saved > 0.0 {
+            fit.whole_session_usd = fit.whole_session_usd + saved
+            gained[m.sid] = true
+        }
+    }
+    fit.whole_sessions = len(keys(gained))
+
+    for _, sid := range keys(sess_turns) {
+        if sess_turns[sid] >= 25 && s.clears[sid] == 0 && peak_by_sid[sid] >= 150000 { ctx.marathon_sessions = ctx.marathon_sessions + 1 }
+    }
+    tot.sessions = len(keys(sessions))
+
+    models := []ModelRow{}
+    for _, name := range keys(by_usd) {
+        share := 0.0
+        if tot.usd > 0.0 { share = by_usd[name] / tot.usd }
+        models = append(models, ModelRow{model: name, usd: by_usd[name], share: share, messages: by_n[name]})
+    }
+    models = sort_by(models, func(a, b) { return a.usd > b.usd })
+
+    all_reads := top_counts(s.reads, 3, 1000000)
+    all_cmds := top_counts(s.cmds, 3, 1000000)
+    waste := Waste{unchanged_rereads: len(all_reads), repeated_commands: len(all_cmds), big_results: top_counts(s.big, 1, 10)}
+
+    // prompts, paths and commands leave the transcript only on request
+    detail := Detail{examples: []Example{}, rereads: []Count{}, commands: []Count{}}
+    if examples {
+        found = sort_by(found, func(a, b) { return a.usd_saved_max > b.usd_saved_max })
+        for j, x := range found {
+            if j < 5 { detail.examples = append(detail.examples, x) }
+        }
+        detail.rereads = file_labels(top_counts(s.reads, 3, 5))
+        for _, cmdrow := range top_counts(s.cmds, 3, 5) {
+            hash := split(cmdrow.name, "\t")[1]
+            detail.commands = append(detail.commands, Count{name: s.cmd_text[hash], n: cmdrow.n})
+        }
+    }
+
+    rep = Report{version: version, days: days, generated: time_format_utc(now(), "%Y-%m-%dT%H:%M:%SZ"), files: s.files, totals: tot, parts: parts, cache_writes: cache_breakdown(s.msgs, table), models: models, unpriced: top_counts(unpriced, 1, 20), model_fit: fit, context: ctx, waste: waste, detail: detail}
+}

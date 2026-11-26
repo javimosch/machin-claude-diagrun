@@ -1,0 +1,122 @@
+// render: one self-contained HTML page (no script, no external asset), which
+// also satisfies hart's strict CSP.
+
+func esc(t) (out) {
+    out = replace(t, "&", "&amp;")
+    out = replace(out, "<", "&lt;")
+    out = replace(out, ">", "&gt;")
+    out = replace(out, "\"", "&quot;")
+}
+
+// fixed formats a non-negative float with d decimals.
+func fixed(x, d) (out) {
+    scale := 1
+    i := 0
+    for i < d {
+        scale = scale * 10
+        i = i + 1
+    }
+    v := int(x * float(scale) + 0.5)
+    out = str(v / scale)
+    if d > 0 {
+        frac := str(v % scale)
+        for len(frac) < d { frac = "0" + frac }
+        out = out + "." + frac
+    }
+}
+
+func money(x) (out) { out = "$" + fixed(x, 2) }
+
+func share_of(x, total) (out) {
+    p := 0.0
+    if total > 0.0 { p = x * 100.0 / total }
+    out = fixed(p, 1) + "%"
+}
+
+func bar(label, x, total) (h) {
+    w := 0.0
+    if total > 0.0 { w = x * 100.0 / total }
+    h = "<div class=bar><span>" + esc(label) + "</span><s><i style=\"width:" + fixed(w, 1) + "%\"></i></s><b>" + share_of(x, total) + "</b><em>" + money(x) + "</em></div>"
+}
+
+func cause_label(c) (l) { l = replace(replace(c, "rebuild_", "rebuild: "), "_", " ") }
+
+func count_list(title, rows) (h) {
+    h = ""
+    if len(rows) == 0 { return h }
+    h = "<h3>" + title + "</h3><ul>"
+    for _, c := range rows { h = h + "<li><b>" + str(c.n) + "×</b> <code>" + esc(c.name) + "</code></li>" }
+    h = h + "</ul>"
+}
+
+func css() (c) {
+    c = ":root{--bg:#f6f5f1;--card:#fff;--ink:#17202a;--mute:#5d6b78;--line:#dedbd2;--acc:#0f6e78}" +
+        "@media(prefers-color-scheme:dark){:root{--bg:#10151a;--card:#182027;--ink:#e8eef2;--mute:#93a4b1;--line:#2a353e;--acc:#4fc3cf}}" +
+        "body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,sans-serif}main{max-width:780px;margin:0 auto;padding:32px 16px 64px}" +
+        "h1{margin:0;font-size:26px}h2{margin:0 0 10px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--acc)}h3{font-size:14px;margin:16px 0 4px}" +
+        "p.sub,small,em{color:var(--mute);font-style:normal}section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:18px 0;overflow-x:auto}" +
+        ".big{font-size:38px;font-weight:700}.bar{display:grid;grid-template-columns:minmax(90px,200px) 1fr 56px 76px;gap:10px;align-items:center;font-size:14px;margin:6px 0}" +
+        ".bar span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bar s{display:block;height:9px;background:var(--line);border-radius:5px}.bar i{display:block;height:9px;background:var(--acc);border-radius:5px}.bar em{text-align:right}" +
+        "table{border-collapse:collapse;width:100%;font-size:14px}td,th{text-align:left;padding:5px 8px 5px 0;border-bottom:1px solid var(--line)}code{font-size:.88em;overflow-wrap:anywhere}"
+}
+
+func render_html(r) (h) {
+    t := r.totals
+    h = "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">" +
+        "<title>diagrun report</title><meta name=\"description\" content=\"Claude Code usage diagnostic\"><style>" + css() + "</style></head><body><main>"
+    h = h + "<h1>diagrun</h1><p class=sub>Last " + str(r.days) + " days · " + str(t.turns) + " prompts · " + str(t.sessions) + " sessions · generated " + r.generated + "</p>"
+
+    h = h + "<section><h2>Spend at API list price</h2><div class=big>" + money(t.usd) + "</div><small>On a subscription, read the shares, not the dollars.</small>"
+    h = h + bar("cache reads", r.parts.cache_read, t.usd) + bar("cache writes", r.parts.cache_write, t.usd) + bar("output", r.parts.output, t.usd) + bar("fresh input", r.parts.input, t.usd) + "</section>"
+
+    w_usd := r.parts.cache_write
+    h = h + "<section><h2>Why cache was written</h2><small>Shares of the " + money(w_usd) + " spent on cache writes, over " + str(r.cache_writes.windows) + " context windows (sessions and subagents).</small>"
+    for _, row := range r.cache_writes.rows { h = h + bar(cause_label(row.cause), row.usd, w_usd) }
+    h = h + "<p><small>First request: the initial fill of a window (a resumed session counts as new). Growth: new content. Rebuild: part of the previous prompt written again. " +
+        "Idle expired: the gap between requests passed the cache lifetime. Unexplained: same model, within the lifetime; the logs do not show why.</small></p></section>"
+
+    idle := r.cache_writes.idle
+    if len(idle.rows) > 0 {
+        idle_usd := 0.0
+        for _, g := range idle.by_pause { idle_usd = idle_usd + g.usd }
+        h = h + "<section><h2>Rebuilds after idle expiry</h2><small>Shares of " + money(idle_usd) + ".</small><h3>By pause length</h3>"
+        for _, g := range idle.by_pause { h = h + bar(g.name + " (" + str(g.rebuilds) + ")", g.usd, idle_usd) }
+        h = h + "<h3>By what arrived before the next request</h3>"
+        for _, g := range idle.by_trigger { h = h + bar(replace(g.name, "_", " ") + " (" + str(g.rebuilds) + ")", g.usd, idle_usd) }
+        h = h + "<p><small>Counts in brackets. Triggers come from known transcript markers. A typed prompt can also be a script or an unrecognised scheduler.</small></p></section>"
+    }
+
+    h = h + "<section><h2>By model</h2>"
+    for _, m := range r.models { h = h + bar(m.model, m.usd, t.usd) }
+    h = h + "<h3>Who spent it</h3>" + bar("main conversation", t.main_usd, t.usd) + bar("subagents", t.subagent_usd, t.usd)
+    for _, c := range r.unpriced { h = h + "<p><small>Not priced, excluded from totals: " + esc(c.name) + " (" + str(c.n) + " messages)</small></p>" }
+    h = h + "</section>"
+
+    f := r.model_fit
+    h = h + "<section><h2>Right model for the task</h2><div class=big>" + share_of(f.whole_session_usd, t.usd) + " – " + share_of(f.per_turn_ceiling_usd, t.usd) + "</div>" +
+        "<small>Low: " + str(f.whole_sessions) + " sessions where every prompt was simple, so the cheaper model could have been chosen at the start. " +
+        "High: every simple prompt repriced on its own, ignoring the cache rebuild a mid-conversation switch costs. It is a ceiling.</small>"
+    if len(f.by_kind) > 0 {
+        h = h + "<table><tr><th>Kind</th><th>Ran on</th><th>Candidate</th><th>Prompts</th><th>At most</th></tr>"
+        for _, k := range f.by_kind { h = h + "<tr><td>" + k.kind + "</td><td>" + k.from + "</td><td>" + k.to + "</td><td>" + str(k.turns) + "</td><td>" + money(k.usd_saved_max) + "</td></tr>" }
+        h = h + "</table>"
+    }
+    if len(r.detail.examples) > 0 {
+        h = h + "<h3>Examples</h3><ul>"
+        for _, x := range r.detail.examples { h = h + "<li>" + esc(x.prompt) + " <em>" + x.from + " → " + x.to + "</em></li>" }
+        h = h + "</ul>"
+    }
+    h = h + "</section>"
+
+    cx := r.context
+    h = h + "<section><h2>Long context</h2><div class=big>" + share_of(cx.over_150k_usd, t.usd) + " – " + share_of(cx.over_100k_usd, t.usd) + "</div>" +
+        "<small>Cost of re-reading tokens beyond 150k and beyond 100k. A ceiling: /clear and /compact have their own cost.</small>" +
+        "<p>" + str(cx.messages_over_100k) + " API messages ran above 100k. " + str(cx.marathon_sessions) + " sessions had 25+ prompts, passed 150k and were never cleared.</p></section>"
+
+    w := r.waste
+    h = h + "<section><h2>Repeated work</h2><p><b>" + str(w.unchanged_rereads) + "</b> file ranges read 3+ times with no edit in between · <b>" + str(w.repeated_commands) + "</b> commands run 3+ times in one context (polling can be legitimate).</p>"
+    h = h + count_list("Results over 20k characters, by tool", w.big_results) + count_list("Most re-read files", r.detail.rereads) + count_list("Most repeated commands", r.detail.commands) + "</section>"
+
+    h = h + "<p><small>diagrun " + r.version + ". Task classes come from simple rules, not a judgement of quality: a cheaper model is a candidate to try, not a proven equivalent. " +
+        "The two estimates above overlap and must not be added. Idea: github.com/Francoisnollet/diagrun (MIT).</small></p></main></body></html>"
+}

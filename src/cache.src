@@ -1,0 +1,103 @@
+// cache: why was each cache write paid? Every context window (a session, or one
+// subagent) is replayed in time order. Tokens of the previous prompt that were
+// not read back, and had to be written again, are a rebuild.
+
+type CacheRow struct { cause string  events int  tokens int  usd float }
+type CacheWrites struct { windows int  rows []CacheRow  idle Idle }
+
+// epoch_of turns an ISO-8601 UTC timestamp into unix seconds (days-from-civil).
+func epoch_of(ts) (sec) {
+    sec = 0
+    if len(ts) < 19 { return sec }
+    y := parse_int(substr(ts, 0, 4))
+    m := parse_int(substr(ts, 5, 7))
+    d := parse_int(substr(ts, 8, 10))
+    mp := m - 3
+    if m <= 2 {
+        y = y - 1
+        mp = m + 9
+    }
+    days := 365 * y + y / 4 - y / 100 + y / 400 + (153 * mp + 2) / 5 + d - 1 - 719468
+    sec = days * 86400 + parse_int(substr(ts, 11, 13)) * 3600 + parse_int(substr(ts, 14, 16)) * 60 + parse_int(substr(ts, 17, 19))
+}
+
+func cache_causes() (c) {
+    c = []string{"first_request", "growth", "rebuild_idle_expired", "rebuild_model_switch", "rebuild_context_shrunk", "rebuild_unexplained"}
+}
+
+// add_write books `tokens` of one message's writes, at that message's own mix
+// of 5 min and 1 h prices.
+func add_write(rows, i, tokens, m, p) (r) {
+    r = rows
+    if tokens <= 0 { return r }
+    row := r[i]
+    row.events = row.events + 1
+    row.tokens = row.tokens + tokens
+    row.usd = row.usd + cost_at(tier_of(p, m.tin + m.w5 + m.w1 + m.cr), 0, 0, m.w5, m.w1, 0) * float(tokens) / float(m.w5 + m.w1)
+    r[i] = row
+}
+
+type Prev struct { size int  at int  ttl int  model string }
+
+// rebuild_cause names the most specific explanation for a lost prefix.
+func rebuild_cause(prev, m, shrunk) (i) {
+    i = 5
+    if shrunk { i = 4 }
+    else if m.model != prev.model { i = 3 }
+    else if m.at - prev.at > prev.ttl { i = 2 }
+}
+
+func cache_breakdown(msgs, table) (out) {
+    rows := []CacheRow{}
+    for _, name := range cache_causes() { rows = append(rows, CacheRow{cause: name, events: 0, tokens: 0, usd: 0.0}) }
+    ordered := sort_by(msgs, func(a, b) { return a.scope < b.scope || (a.scope == b.scope && a.at < b.at) })
+    prev := Prev{size: 0, at: 0, ttl: 300, model: ""}
+    scope := ""
+    windows := 0
+    found := []IdleRow{}
+    for _, m := range ordered {
+        pi := price_index(table, m.model)
+        if pi < 0 { continue }
+        p := table[pi]
+        size := m.tin + m.w5 + m.w1 + m.cr
+        write := m.w5 + m.w1
+        // a request with no prompt tokens says nothing about the cache
+        if size == 0 { continue }
+        ttl := prev.ttl
+        if m.scope != scope {
+            scope = m.scope
+            windows = windows + 1
+            ttl = 300
+            rows = add_write(rows, 0, write, m, p)
+        } else {
+            // under 60% of the previous prompt: compacted, cleared or rewound
+            shrunk := size * 10 < prev.size * 6
+            lost := prev.size - m.cr
+            if shrunk { lost = write }
+            // small shortfalls are normal: the uncached tail of a request
+            rebuilt := 0
+            if lost > 2000 && lost * 10 > prev.size { rebuilt = imin(write, lost) }
+            if shrunk { rebuilt = write }
+            if rebuilt > 0 {
+                cause := rebuild_cause(prev, m, shrunk)
+                rows = add_write(rows, cause, rebuilt, m, p)
+                if cause == 2 {
+                    usd := cost_at(tier_of(p, size), 0, 0, m.w5, m.w1, 0) * float(rebuilt) / float(write)
+                    kind := "main"
+                    if m.sub { kind = "subagent" }
+                    found = append(found, IdleRow{pause: pause_of(m.at - prev.at), trigger: m.trigger, window: kind, rebuilds: 1, tokens: rebuilt, usd: usd})
+                }
+            }
+            rows = add_write(rows, 1, write - rebuilt, m, p)
+        }
+        // a read-only request keeps the TTL of the last write
+        if m.w1 > 0 { ttl = 3600 } else if m.w5 > 0 { ttl = 300 }
+        prev = Prev{size: size, at: m.at, ttl: ttl, model: m.model}
+    }
+    out = CacheWrites{windows: windows, rows: rows, idle: summarize_idle(found)}
+}
+
+func imin(a, b) (m) {
+    m = a
+    if b < a { m = b }
+}

@@ -1,0 +1,56 @@
+// pricing: USD per million tokens. First substring match wins, so keep the
+// more specific ids first. read = cache read. Cache writes are 1.25x input
+// (5 min TTL) and 2x input (1 h TTL). Prices cached 2026-11-03.
+// For ids older than the 5.5 / 5.2 generation, `read` is assumed 0.1x input.
+
+type Price struct { key string  in float  out float  read float  rank int }
+
+func prices() (p) {
+    p = []Price{
+        Price{key: "fable-5-2", in: 8.0, out: 40.0, read: 0.20, rank: 3},
+        Price{key: "mythos-5-2", in: 8.0, out: 40.0, read: 0.20, rank: 3},
+        Price{key: "fable-5", in: 10.0, out: 50.0, read: 1.0, rank: 3},
+        Price{key: "mythos-5", in: 10.0, out: 50.0, read: 1.0, rank: 3},
+        Price{key: "opus-5-5", in: 4.0, out: 20.0, read: 0.20, rank: 2},
+        Price{key: "opus-5", in: 5.0, out: 25.0, read: 0.50, rank: 2},
+        Price{key: "opus-4-5", in: 5.0, out: 25.0, read: 0.50, rank: 2},
+        Price{key: "opus-4-6", in: 5.0, out: 25.0, read: 0.50, rank: 2},
+        Price{key: "opus-4-7", in: 5.0, out: 25.0, read: 0.50, rank: 2},
+        Price{key: "opus-4-8", in: 5.0, out: 25.0, read: 0.50, rank: 2},
+        Price{key: "sonnet-5-5", in: 2.0, out: 10.0, read: 0.10, rank: 1},
+        Price{key: "sonnet-5", in: 2.0, out: 10.0, read: 0.20, rank: 1},
+        Price{key: "sonnet-4", in: 3.0, out: 15.0, read: 0.30, rank: 1},
+        Price{key: "haiku-5-5", in: 0.10, out: 0.50, read: 0.01, rank: 0},
+        Price{key: "haiku-4-5", in: 1.0, out: 5.0, read: 0.10, rank: 0}
+    }
+}
+
+// price_index returns -1 for a model with no known price. Such usage is
+// reported as unpriced, never guessed.
+func price_index(table, model) (i) {
+    i = 0
+    for i < len(table) {
+        if contains(model, table[i].key) { return i }
+        i = i + 1
+    }
+    i = -1
+}
+
+// tier_of resolves the rates for a whole prompt size: Haiku 5.5 costs more past
+// 100K. Resolve it before splitting a message's cost into parts.
+func tier_of(p, size) (r) {
+    r = p
+    if p.key == "haiku-5-5" && size > 100000 {
+        r.in = 0.50
+        r.out = 2.50
+        r.read = 0.05
+    }
+}
+
+// cost_at applies already-resolved rates.
+func cost_at(p, tin, tout, w5, w1, cr) (c) {
+    c = (float(tin) * p.in + float(tout) * p.out + float(w5) * p.in * 1.25 + float(w1) * p.in * 2.0 + float(cr) * p.read) / 1000000.0
+}
+
+// cost_usd prices one whole API message.
+func cost_usd(p, tin, tout, w5, w1, cr) (c) { c = cost_at(tier_of(p, tin + w5 + w1 + cr), tin, tout, w5, w1, cr) }

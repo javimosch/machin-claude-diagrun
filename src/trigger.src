@@ -1,0 +1,89 @@
+// trigger: what arrived in a context window just before a request. It is read
+// from the user lines since the previous request, using known markers only.
+
+// text_trigger classifies a user line that is not a tool result.
+func text_trigger(flat, meta, sub) (t) {
+    t = "typed_prompt"
+    if sub { t = "agent_instruction" }
+    if has_prefix(flat, "<task-notification>") { t = "background_task" }
+    else if contains(flat, "<agent-message") || contains(flat, "<teammate-message") { t = "agent_message" }
+    else if contains(flat, "<<autonomous-loop") || has_prefix(flat, "<scheduled-task") { t = "scheduled" }
+    else if has_prefix(flat, "<command-") || has_prefix(flat, "<local-command") || has_prefix(flat, "Caveat:") || has_prefix(flat, "[Request interrupted") { t = "command_or_interrupt" }
+    else if meta { t = "system_injected" }
+}
+
+// trigger_rank keeps the most telling line when several precede one request.
+func trigger_rank(t) (r) {
+    r = 3
+    if t == "system_injected" { r = 1 }
+    else if has_prefix(t, "tool_result") || t == "question_answered" { r = 2 }
+    else if t == "command_or_interrupt" { r = 2 }
+}
+
+// result_trigger names a tool result by the tool that produced it. A pause that
+// ends in one is a long-running tool or a wait for the human to approve it.
+func result_trigger(tool) (t) {
+    t = "tool_result_or_approval"
+    if tool == "AskUserQuestion" || tool == "ExitPlanMode" { t = "question_answered" }
+}
+
+type IdleRow struct { pause string  trigger string  window string  rebuilds int  tokens int  usd float }
+type GroupRow struct { name string  rebuilds int  tokens int  usd float }
+type Idle struct { by_pause []GroupRow  by_trigger []GroupRow  rows []IdleRow }
+
+func pause_names() (p) { p = []string{"5m-1h", "1h-2h", "2h-8h", "8h-24h", "over_24h"} }
+
+func pause_of(sec) (p) {
+    p = "over_24h"
+    if sec <= 3600 { p = "5m-1h" }
+    else if sec <= 7200 { p = "1h-2h" }
+    else if sec <= 28800 { p = "2h-8h" }
+    else if sec <= 86400 { p = "8h-24h" }
+}
+
+func add_group(rows, name, x) (r) {
+    r = rows
+    i := 0
+    for i < len(r) {
+        if r[i].name == name { break }
+        i = i + 1
+    }
+    if i == len(r) { r = append(r, GroupRow{name: name, rebuilds: 0, tokens: 0, usd: 0.0}) }
+    g := r[i]
+    g.rebuilds = g.rebuilds + 1
+    g.tokens = g.tokens + x.tokens
+    g.usd = g.usd + x.usd
+    r[i] = g
+}
+
+// summarize_idle turns one entry per idle rebuild into the cross table and its
+// two margins.
+func summarize_idle(found) (out) {
+    by_pause := []GroupRow{}
+    by_trigger := []GroupRow{}
+    rows := []IdleRow{}
+    at := make(map[string]int)
+    for _, p := range pause_names() {
+        for _, x := range found {
+            if x.pause == p { by_pause = add_group(by_pause, p, x) }
+        }
+    }
+    for _, x := range found {
+        by_trigger = add_group(by_trigger, x.trigger, x)
+        key := x.pause + "|" + x.trigger + "|" + x.window
+        i := at[key] - 1
+        if i < 0 {
+            rows = append(rows, x)
+            at[key] = len(rows)
+        } else {
+            row := rows[i]
+            row.rebuilds = row.rebuilds + 1
+            row.tokens = row.tokens + x.tokens
+            row.usd = row.usd + x.usd
+            rows[i] = row
+        }
+    }
+    by_trigger = sort_by(by_trigger, func(a, b) { return a.usd > b.usd })
+    rows = sort_by(rows, func(a, b) { return a.usd > b.usd })
+    out = Idle{by_pause: by_pause, by_trigger: by_trigger, rows: rows}
+}
