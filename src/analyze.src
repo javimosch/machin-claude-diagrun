@@ -10,6 +10,7 @@ type ContextCost struct { over_150k_usd float  over_100k_usd float  messages_ove
 type Waste struct { unchanged_rereads int  repeated_commands int  big_results []Count }
 type Detail struct { examples []Example  rereads []Count  commands []Count }
 type Report struct {
+    ok bool
     version string
     days int
     generated string
@@ -277,5 +278,5 @@ func analyze(s, days, version, examples) (rep) {
         }
     }
 
-    rep = Report{version: version, days: days, generated: time_format_utc(now(), "%Y-%m-%dT%H:%M:%SZ"), files: s.files, totals: tot, parts: parts, cache_writes: cache_breakdown(s.msgs, table), models: models, unpriced: top_counts(unpriced, 1, 20), model_fit: fit, context: ctx, waste: waste, detail: detail}
+    rep = Report{ok: true, version: version, days: days, generated: time_format_utc(now(), "%Y-%m-%dT%H:%M:%SZ"), files: s.files, totals: tot, parts: parts, cache_writes: cache_breakdown(s.msgs, table), models: models, unpriced: top_counts(unpriced, 1, 20), model_fit: fit, context: ctx, waste: waste, detail: detail}
 }

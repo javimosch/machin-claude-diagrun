@@ -120,9 +120,9 @@ with tempfile.TemporaryDirectory() as home:
     check("publish url", json.loads(p.stdout or "{}").get("url"), "https://h/a/me/diagrun")
     check("publish unlisted", "--visibility unlisted" in open(os.path.join(home, "hart.args")).read(), True)
     os.remove(os.path.join(home, "hart.args"))
-    check("examples need private", run(home, *base, "--examples", env=penv).returncode, 80)
-    check("private needs key", run(home, *base, "--private", env=penv).returncode, 80)
-    check("owner injection refused", run(home, "report", "--root", root, "--publish", "--owner", "me;id", env=penv).returncode, 80)
+    check("examples need private", run(home, *base, "--examples", env=penv).returncode, 85)
+    check("private needs key", run(home, *base, "--private", env=penv).returncode, 85)
+    check("owner injection refused", run(home, "report", "--root", root, "--publish", "--owner", "me;id", env=penv).returncode, 85)
     check("refusals never call hart", os.path.exists(os.path.join(home, "hart.args")), False)
     p = run(home, *base, "--private", "--examples", env={**penv, "HART_READ_KEY": "k3y"})
     args = open(os.path.join(home, "hart.args")).read()
@@ -225,11 +225,29 @@ with tempfile.TemporaryDirectory() as home:
     for key in ("rows", "by_pause", "by_trigger"):
         check(f"idle {key} add up", sum(x["usd"] for x in idle[key]), total)
 
-    check("no data exit", run(home, "scan", "--root", os.path.join(home, "none")).returncode, 90)
-    check("bad days", run(home, "scan", "--days", "x").returncode, 80)
+    check("no data exit", run(home, "scan", "--root", os.path.join(home, "none")).returncode, 92)
+    check("bad days", run(home, "scan", "--days", "x").returncode, 85)
     p = run(home, "bogus")
     check("typed error", json.loads(p.stderr)["error"]["type"], "invalid_argument")
-    json.loads(run(home, "help-json").stdout)
+    # cli-output-spec / cli-guide-spec behaviour the validator does not cover
+    cat = json.loads(run(home, "help-json").stdout)
+    check("catalog", (sorted(cat["commands"]), cat["env"]), (["guide", "help-json", "report", "scan", "version"], ["HOME", "HART_URL", "HART_READ_KEY"]))
+    g = json.loads(run(home, "guide").stdout)
+    check("guide keys", [k for k in ("diagrun", "one_liner", "model", "loop", "concepts", "commands", "examples", "gotchas") if k not in g], [])
+    check("guide version", g["version"], cat["version"])
+    human = run(home, "guide", "--human").stdout
+    check("human has every gotcha", all(x in human for x in g["gotchas"]), True)
+    check("version json", json.loads(run(home, "version", "--json").stdout)["version"], g["version"])
+    check("non-interactive flags", run(home, "scan", "--root", root, "--yes", "--no-interactive", "--json", "-y").returncode, 0)
+    err = json.loads(run(home, "scan", "--root", os.path.join(home, "none")).stderr)
+    check("error shape", (err["ok"], err["error"]["recoverable"], len(err["error"]["suggestions"]) > 0), (False, False, True))
+    with open(os.path.join(fake, "hart"), "w") as h:
+        h.write("#!/bin/sh\necho boom >&2\nexit 1\n")
+    p = run(home, *base, env=penv)
+    err = json.loads(p.stderr)["error"]
+    check("publish failure is retryable", (p.returncode, err["code"], err["recoverable"]), (105, 105, True))
+    p = run(home, "report", "--root", root, "--out", os.path.join(home, "no", "dir", "r.html"))
+    check("unwritable report", (p.returncode, json.loads(p.stderr.strip().splitlines()[-1])["error"]["type"]), (92, "write_failed"))
 
 print("\n".join(fails) if fails else "all checks passed")
 sys.exit(1 if fails else 0)

@@ -53,13 +53,12 @@ seen.
 - Prices are hardcoded in `src/pricing.src` (cached 2026-11-03). Cache-read
   prices for models older than the 5.5 / 5.2 generation are assumed 0.1x input.
 - Classification is a French/English keyword heuristic.
-- `guide`, `help-json` and typed errors exist; `feedback`, `update` and
-  `install` do not yet.
 - Tests use synthetic transcripts. It has also been run on real ones, but its
   trigger markers are not verified against a format specification.
 - Needs [machin](https://github.com/javimosch/machin) and a C compiler to build.
-- [cli-specs](https://cli-specs.intrane.fr/): partial. `cli-spec-conformance`
-  (`output`, `guide`) passes 11 of 14 checks; `guide` is not JSON yet.
+- [cli-specs](https://cli-specs.intrane.fr/): `output` and `guide` adopted
+  (`cli-spec-conformance` passes all its checks for both). `feedback`, `update`
+  and `install` are not implemented; there is deliberately no telemetry.
 
 ## Tests and memory
 

@@ -1,0 +1,139 @@
+// guide: the operator manual (cli-guide-spec) and the command catalog
+// (cli-output-spec §4). JSON and --human render the same data.
+
+type Pair struct { k string  v string }
+type Recipe struct { goal string  do []string }
+
+func about() (v) { v = "Diagnostic of local Claude Code token usage and cost" }
+
+func one_liner() (v) { v = "Reads local Claude Code transcripts, bills each API message at list price, and shows what model choice, long context and cache rebuilds cost. JSON on stdout, optional HTML report on hart." }
+
+func guide_model() (p) {
+    p = []Pair{
+        Pair{k: "input", v: "*.jsonl transcripts under --root (default ~/.claude/projects), limited to the last --days"},
+        Pair{k: "billing", v: "each API message once, even if copied into a resumed transcript; subagents separately; unknown models are listed as unpriced, never guessed"},
+        Pair{k: "network", v: "none, except report --publish, which calls the hart CLI"}
+    }
+}
+
+func guide_loop() (l) {
+    l = []string{
+        "diagrun scan --days 7",
+        "start with the largest of parts.cache_write, parts.cache_read and parts.output",
+        "if cache writes matter, read cache_writes.rows, then cache_writes.idle",
+        "diagrun report --days 7 for an HTML page; add --publish --owner NAME only when asked to share it",
+        "change one habit, scan again a week later and compare shares of totals.usd"
+    }
+}
+
+func guide_concepts() (p) {
+    p = []Pair{
+        Pair{k: "totals.usd", v: "API list price. On a subscription use shares only."},
+        Pair{k: "cache_writes.rows", v: "why each write was paid: first_request, growth, or rebuild_* (idle expired, model switch, shrunk context, unexplained). Adds up to parts.cache_write."},
+        Pair{k: "cache_writes.idle", v: "idle rebuilds by pause length and by what arrived before the next request"},
+        Pair{k: "model_fit", v: "whole_session_usd counts sessions that could have started on a cheaper model; per_turn_ceiling_usd ignores cache rebuilds"},
+        Pair{k: "context", v: "cost of re-reading beyond 100k and 150k tokens. A ceiling."},
+        Pair{k: "waste", v: "unchanged re-reads, repeated commands and results over 20k characters"}
+    }
+}
+
+func local_commands() (c) {
+    c = []string{
+        "diagrun scan [--days N] [--root DIR] [--examples]",
+        "diagrun report [--days N] [--root DIR] [--examples] [--out FILE]",
+        "diagrun guide [--human]",
+        "diagrun help-json",
+        "diagrun version [--json]"
+    }
+}
+
+func publish_commands() (c) { c = []string{"diagrun report --publish --owner NAME [--artifact NAME] [--private]"} }
+
+func guide_examples() (r) {
+    r = []Recipe{
+        Recipe{goal: "see why cache writes were paid this week", do: []string{"diagrun scan --days 7 > scan.json", "jq .cache_writes scan.json"}},
+        Recipe{goal: "write a local HTML report", do: []string{"diagrun report --days 30 --out report.html"}},
+        Recipe{goal: "publish a report with prompts and commands, password-gated", do: []string{"HART_READ_KEY=... diagrun report --examples --publish --owner NAME --private"}}
+    }
+}
+
+func guide_gotchas() (g) {
+    g = []string{
+        "default output holds no prompt text, file names or commands; --examples adds them, and commands may contain secrets",
+        "publishing with --examples requires --private and HART_READ_KEY",
+        "an unlisted hart page is readable by anyone who has the link",
+        "model_fit, context and idle rebuild figures overlap: never add them",
+        "task classes and triggers are heuristics; typed_prompt can include scripts or unrecognised schedulers",
+        "Claude Code deletes old transcripts (30 days by default)",
+        "the first request after the --days cutoff in an older session counts as first_request",
+        "cache-read prices for models older than the 5.5 and 5.2 generation are assumed to be 0.1x input"
+    }
+}
+
+// json() quotes and escapes a string; these only assemble the containers.
+func j_list(items) (out) { out = "[" + join(items, ",") + "]" }
+
+func j_strings(l) (out) {
+    q := []string{}
+    for _, v := range l { q = append(q, json(v)) }
+    out = j_list(q)
+}
+
+func j_pairs(p) (out) {
+    q := []string{}
+    for _, x := range p { q = append(q, json(x.k) + ":" + json(x.v)) }
+    out = "{" + join(q, ",") + "}"
+}
+
+func guide_json() (g) {
+    ex := []string{}
+    for _, r := range guide_examples() { ex = append(ex, "{\"goal\":" + json(r.goal) + ",\"do\":" + j_strings(r.do) + "}") }
+    g = "{\"ok\":true,\"version\":" + json(version()) +
+        ",\"diagrun\":" + json(about()) +
+        ",\"one_liner\":" + json(one_liner()) +
+        ",\"model\":" + j_pairs(guide_model()) +
+        ",\"loop\":" + j_strings(guide_loop()) +
+        ",\"concepts\":" + j_pairs(guide_concepts()) +
+        ",\"commands\":{\"local\":" + j_strings(local_commands()) + ",\"publish\":" + j_strings(publish_commands()) + "}" +
+        ",\"examples\":" + j_list(ex) +
+        ",\"gotchas\":" + j_strings(guide_gotchas()) +
+        ",\"see_also\":[\"help-json\",\"version\"]}"
+}
+
+func md_list(title, l) (out) {
+    out = "\n## " + title + "\n\n"
+    for _, v := range l { out = out + "- " + v + "\n" }
+}
+
+func md_pairs(title, p) (out) {
+    out = "\n## " + title + "\n\n"
+    for _, x := range p { out = out + "- **" + x.k + "**: " + x.v + "\n" }
+}
+
+func guide_human() (g) {
+    g = "# diagrun " + version() + "\n\n" + about() + ".\n\n" + one_liner() + "\n"
+    g = g + md_pairs("Model", guide_model()) + md_list("Loop", guide_loop()) + md_pairs("Concepts", guide_concepts())
+    g = g + md_list("Commands", local_commands()) + md_list("Publishing", publish_commands()) + "\n## Examples\n"
+    for _, r := range guide_examples() { g = g + "\n" + r.goal + ":\n\n    " + join(r.do, "\n    ") + "\n" }
+    g = g + md_list("Gotchas", guide_gotchas())
+}
+
+// command_json is one catalog entry. No command authenticates by itself;
+// --publish relies on the hart CLI's own configuration.
+func command_json(name, summary, flags) (out) {
+    out = json(name) + ":{\"summary\":" + json(summary) + ",\"args\":[],\"flags\":" + j_strings(flags) + ",\"auth\":false}"
+}
+
+func help_json() (h) {
+    c := []string{
+        command_json("scan", "diagnostic as JSON", []string{"--days N", "--root DIR", "--examples"}),
+        command_json("report", "write an HTML report; --publish uploads it to hart", []string{"--days N", "--root DIR", "--examples", "--out FILE", "--publish", "--owner NAME", "--artifact NAME", "--private"}),
+        command_json("guide", "the mental model, loop and gotchas", []string{"--human"}),
+        command_json("help-json", "this catalog", []string{}),
+        command_json("version", "the version", []string{})
+    }
+    h = "{\"ok\":true,\"version\":" + json(version()) + ",\"output\":\"json\",\"commands\":{" + join(c, ",") + "}" +
+        ",\"global_flags\":[\"--json\",\"--yes\",\"-y\",\"--no-interactive\"]" +
+        ",\"exit_codes\":{\"0\":\"success\",\"80\":\"invalid arguments\",\"85\":\"invalid argument value or unsafe request\",\"92\":\"resource not found or not writable\",\"105\":\"publish failed (external)\"}" +
+        ",\"env\":[\"HOME\",\"HART_URL\",\"HART_READ_KEY\"],\"see_also\":[\"guide\"]}"
+}

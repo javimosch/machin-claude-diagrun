@@ -1,54 +1,37 @@
 // diagrun: agent-first diagnostic of local Claude Code token usage.
 
-func version() (v) { v = "0.3.0" }
+func version() (v) { v = "0.4.0" }
 
-func guide_text() (g) {
-    g = "diagrun - where did the Claude Code tokens go?\n\n" +
-        "MODEL  Reads transcripts (*.jsonl) under --root, bills each API message once at list price\n" +
-        "       (subagents separately), then estimates what model choice and long context cost.\n" +
-        "LOOP   scan (JSON) -> act on the biggest number -> report (HTML) -> report --publish (hart).\n\n" +
-        "READ THE NUMBERS\n" +
-        "  totals.usd          API list price. On a subscription use shares only.\n" +
-        "  cache_writes        why each write was paid: first_request, growth, or rebuild_* (idle, model switch,\n" +
-        "                      shrunk context, unexplained). Rows add up to parts.cache_write.\n" +
-        "  cache_writes.idle   idle rebuilds by pause length and by what arrived before the next request.\n" +
-        "  model_fit           whole_session_usd is the realistic figure; per_turn_ceiling_usd ignores cache rebuilds.\n" +
-        "  context             ceilings. They overlap model_fit: never add them.\n" +
-        "  unpriced            models with no known price are excluded, never guessed.\n\n" +
-        "PRIVACY\n" +
-        "  Default output holds counts only. --examples adds prompt starts, file names and commands\n" +
-        "  (commands may contain secrets). Nothing is sent anywhere except by report --publish.\n" +
-        "  Publishing with --examples requires --private and HART_READ_KEY.\n\n" +
-        "GOTCHAS  Claude Code deletes old transcripts (30 days by default). Classification is heuristic.\n"
-}
-
-func help_json() (h) {
-    h = "{\"name\":\"diagrun\",\"version\":\"" + version() + "\",\"commands\":[" +
-        "{\"name\":\"scan\",\"summary\":\"diagnostic as JSON on stdout\",\"flags\":[\"--days N\",\"--root DIR\",\"--examples\"]}," +
-        "{\"name\":\"report\",\"summary\":\"write an HTML report; with --publish, upload it to hart\",\"flags\":[\"--days N\",\"--root DIR\",\"--examples\",\"--out FILE\",\"--publish\",\"--owner NAME\",\"--artifact NAME\",\"--private\"]}," +
-        "{\"name\":\"guide\"},{\"name\":\"help-json\"},{\"name\":\"version\"}]," +
-        "\"exit_codes\":{\"0\":\"ok\",\"80\":\"invalid arguments\",\"90\":\"no data\",\"100\":\"write or publish failed\"}}"
-}
-
-type ErrBody struct { code int  type_name string  message string  recoverable bool }
-
-func die(code, kind, message) {
-    eprintln("{\"error\":{\"code\":" + str(code) + ",\"type\":" + json_quote(kind) + ",\"message\":" + json_quote(message) + ",\"recoverable\":false}}")
+// die prints the typed error (cli-output-spec §3). Only external failures
+// (100-109) are worth retrying; the tool itself never retries.
+func die(code, kind, message, suggestions) {
+    again := "false"
+    if code >= 100 && code <= 109 { again = "true" }
+    eprintln("{\"ok\":false,\"error\":{\"code\":" + str(code) + ",\"type\":" + json(kind) + ",\"message\":" + json(message) + ",\"recoverable\":" + again + ",\"suggestions\":" + j_strings(suggestions) + "}}")
     exit(code)
 }
 
-type Opts struct { cmd string  days int  root string  out string  owner string  artifact string  examples bool  publish bool  private bool }
+func usage(message) { die(80, "invalid_argument", message, []string{"diagrun help-json"}) }
+
+func bad_value(message, fix) { die(85, "invalid_value", message, []string{fix}) }
+
+type Opts struct { cmd string  days int  root string  out string  owner string  artifact string  examples bool  publish bool  private bool  human bool  json_flag bool }
 
 func parse_args(a) (o) {
-    o = Opts{cmd: "", days: 7, root: env("HOME") + "/.claude/projects", out: "", owner: "", artifact: "diagrun", examples: false, publish: false, private: false}
+    o = Opts{cmd: "", days: 7, root: env("HOME") + "/.claude/projects", out: "", owner: "", artifact: "diagrun", examples: false, publish: false, private: false, human: false, json_flag: false}
     i := 1
     for i < len(a) {
         x := a[i]
         if x == "--examples" { o.examples = true }
         else if x == "--publish" { o.publish = true }
         else if x == "--private" { o.private = true }
+        else if x == "--human" { o.human = true }
+        else if x == "--json" { o.json_flag = true }
+        // nothing ever prompts: accepted so callers can pass them safely
+        else if x == "--yes" || x == "-y" || x == "--no-interactive" { }
+        else if x == "--help" || x == "--help-json" || x == "-h" { o.cmd = "help-json" }
         else if x == "--days" || x == "--root" || x == "--out" || x == "--owner" || x == "--artifact" {
-            if i + 1 >= len(a) { die(80, "invalid_argument", x + " needs a value") }
+            if i + 1 >= len(a) { usage(x + " needs a value") }
             v := a[i + 1]
             if x == "--days" { o.days = int_of(v) }
             if x == "--root" { o.root = v }
@@ -58,26 +41,28 @@ func parse_args(a) (o) {
             i = i + 1
         }
         else if o.cmd == "" && !has_prefix(x, "-") { o.cmd = x }
-        else { die(80, "invalid_argument", "unknown argument: " + x) }
+        else { usage("unknown argument: " + x) }
         i = i + 1
     }
+    if o.human && o.cmd != "guide" { usage("--human only applies to guide") }
+    if o.human && o.json_flag { usage("--human and --json exclude each other") }
 }
 
 func int_of(v) (n) {
-    if !regex_match(v, "^[0-9]{1,4}$") { die(80, "invalid_argument", "--days takes a positive integer") }
+    if !regex_match(v, "^[0-9]{1,4}$") { bad_value("--days takes a positive integer", "diagrun scan --days 7") }
     n = parse_int(v)
-    if n < 1 { die(80, "invalid_argument", "--days takes a positive integer") }
+    if n < 1 { bad_value("--days takes a positive integer", "diagrun scan --days 7") }
 }
 
 // check_publish runs before any scan, so a refused publish costs nothing and
 // leaks nothing.
 func check_publish(o) {
-    if o.cmd != "report" { die(80, "invalid_argument", "--publish only applies to report") }
+    if o.cmd != "report" { usage("--publish only applies to report") }
     // the strict pattern also keeps these values inert in the shell command
-    if !regex_match(o.owner, "^[A-Za-z0-9][A-Za-z0-9._-]*$") { die(80, "invalid_argument", "--publish needs --owner (letters, digits, . _ -)") }
-    if !regex_match(o.artifact, "^[A-Za-z0-9][A-Za-z0-9._-]*$") { die(80, "invalid_argument", "bad --artifact") }
-    if o.examples && !o.private { die(80, "unsafe_publish", "--examples would publish prompts and commands: add --private") }
-    if o.private && env("HART_READ_KEY") == "" { die(80, "invalid_argument", "--private needs HART_READ_KEY in the environment") }
+    if !regex_match(o.owner, "^[A-Za-z0-9][A-Za-z0-9._-]*$") { bad_value("--publish needs --owner (letters, digits, . _ -)", "diagrun report --publish --owner NAME") }
+    if !regex_match(o.artifact, "^[A-Za-z0-9][A-Za-z0-9._-]*$") { bad_value("bad --artifact (letters, digits, . _ -)", "diagrun report --publish --owner NAME --artifact diagrun") }
+    if o.examples && !o.private { die(85, "unsafe_publish", "--examples would publish prompts and commands: add --private", []string{"HART_READ_KEY=... diagrun report --examples --publish --owner NAME --private", "drop --examples"}) }
+    if o.private && env("HART_READ_KEY") == "" { bad_value("--private needs HART_READ_KEY in the environment", "set HART_READ_KEY, or drop --private") }
 }
 
 func shell_quote(v) (q) { q = "'" + replace(v, "'", "'\\''") + "'" }
@@ -94,7 +79,7 @@ func publish(o, file) (url) {
     code, out, errout := exec(cmd)
     res := Published{}
     if code == 0 { res = parse(trim(out), Published{}) }
-    if res.url == "" { die(100, "publish_failed", trim(out + " " + errout)) }
+    if res.url == "" { die(105, "publish_failed", trim(out + " " + errout), []string{"check that hart is installed and HART_URL is reachable: hart help", "rerun the same command"}) }
     url = res.url
 }
 
@@ -102,15 +87,24 @@ type Written struct { ok bool  file string  url string  usd float  prompts int }
 
 func main() {
     o := parse_args(args())
-    if o.cmd == "guide" { print(guide_text())  return }
-    if o.cmd == "help-json" || o.cmd == "" { println(help_json())  return }
-    if o.cmd == "version" { println(version())  return }
-    if o.cmd != "scan" && o.cmd != "report" { die(80, "invalid_argument", "unknown command: " + o.cmd) }
+    if o.cmd == "guide" {
+        if o.human { print(guide_human()) } else { println(guide_json()) }
+        return
+    }
+    if o.cmd == "help-json" || o.cmd == "help" || o.cmd == "" {
+        println(help_json())
+        return
+    }
+    if o.cmd == "version" {
+        if o.json_flag { println("{\"ok\":true,\"version\":" + json(version()) + "}") } else { println(version()) }
+        return
+    }
+    if o.cmd != "scan" && o.cmd != "report" { usage("unknown command: " + o.cmd) }
     if o.publish { check_publish(o) }
-    if !is_dir(o.root) { die(90, "no_data", "no transcript directory: " + o.root) }
+    if !is_dir(o.root) { die(92, "no_data", "no transcript directory: " + o.root, []string{"diagrun scan --root DIR"}) }
 
     rep := analyze(load_all(o.root, o.days), o.days, version(), o.examples)
-    if rep.totals.messages == 0 { die(90, "no_data", "no priced Claude messages in the last " + str(o.days) + " days") }
+    if rep.totals.messages == 0 { die(92, "no_data", "no priced Claude messages in the last " + str(o.days) + " days", []string{"diagrun scan --days 30"}) }
 
     if o.cmd == "scan" {
         println(json(rep))
@@ -124,7 +118,7 @@ func main() {
     }
     // the report can hold prompts: create it owner-only before writing
     system("umask 077 && : > " + shell_quote(out))
-    if write_file(out, render_html(rep)) < 0 { die(100, "write_failed", "cannot write " + out) }
+    if write_file(out, render_html(rep)) < 0 { die(92, "write_failed", "cannot write " + out, []string{"diagrun report --out FILE in a writable directory"}) }
     url := ""
     if o.publish { url = publish(o, out) }
     println(json(Written{ok: true, file: out, url: url, usd: rep.totals.usd, prompts: rep.totals.turns}))
